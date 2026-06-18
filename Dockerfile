@@ -1,5 +1,5 @@
 # Stage 1: Build React Frontend Client
-FROM node:18-alpine AS client-builder
+FROM node:20-alpine AS client-builder
 WORKDIR /app/client
 
 # Copy package descriptors and lockfiles
@@ -11,7 +11,7 @@ COPY client/ ./
 RUN npm run build
 
 # Stage 2: Create Production Server Image
-FROM node:18-alpine
+FROM node:20-alpine
 WORKDIR /app
 
 # Install package descriptors for backend dependencies
