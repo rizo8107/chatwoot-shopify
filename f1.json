@@ -1,0 +1,116 @@
+[
+    {
+        "headers": {
+            "host": "backend-n8n.lhs56u.easypanel.host",
+            "user-agent": "Shopify-Captain-Hook",
+            "content-length": "1802",
+            "accept": "*/*",
+            "accept-encoding": "gzip;q=1.0,deflate;q=0.6,identity;q=0.3",
+            "content-type": "application/json",
+            "x-forwarded-for": "35.243.183.146",
+            "x-forwarded-host": "backend-n8n.lhs56u.easypanel.host",
+            "x-forwarded-port": "443",
+            "x-forwarded-proto": "https",
+            "x-forwarded-server": "217e8a4b56bf",
+            "x-real-ip": "35.243.183.146",
+            "x-shopify-api-version": "2026-07",
+            "x-shopify-event-id": "94fe0189-9a05-4f8b-b6d1-d9eb88e92fa0",
+            "x-shopify-fulfillment-id": "5854331273373",
+            "x-shopify-hmac-sha256": "cBJ0Rw9uwEBpu1JTRAo6BDiEGX7AKj/pkHGYx/X9mZg=",
+            "x-shopify-shop-domain": "nvhu9m-0r.myshopify.com",
+            "x-shopify-topic": "fulfillments/create",
+            "x-shopify-triggered-at": "2026-06-17T04:49:43.598993097Z",
+            "x-shopify-webhook-id": "27226274-1fb9-586b-abb6-dfdc32321ac0"
+        },
+        "params": {},
+        "query": {},
+        "body": {
+            "id": 5854331273373,
+            "order_id": 6528011862173,
+            "status": "success",
+            "created_at": "2026-06-17T10:19:43+05:30",
+            "service": "manual",
+            "updated_at": "2026-06-17T10:19:43+05:30",
+            "tracking_company": null,
+            "shipment_status": null,
+            "location_id": 82160615581,
+            "origin_address": null,
+            "email": "visesha2000@gmail.com",
+            "destination": {
+                "first_name": "Viswanath",
+                "address1": "Karukayil House Kuttur Panambilly Road First Right",
+                "phone": "8610554711",
+                "city": "Thrissur",
+                "zip": "680013",
+                "province": "Kerala",
+                "country": "India",
+                "last_name": "A",
+                "address2": null,
+                "company": null,
+                "latitude": 10.5561012,
+                "longitude": 76.19728239999999,
+                "name": "Viswanath A",
+                "country_code": "IN",
+                "province_code": "KL"
+            },
+            "line_items": [
+                {
+                    "id": 14664196161693,
+                    "variant_id": 48305831411869,
+                    "title": "Aarambh  The Starter Collection |    6 Incense Sticks | 1 Pack",
+                    "quantity": 1,
+                    "sku": null,
+                    "variant_title": null,
+                    "vendor": "Stomatal Farms",
+                    "fulfillment_service": "manual",
+                    "product_id": 8923090616477,
+                    "requires_shipping": true,
+                    "taxable": true,
+                    "gift_card": false,
+                    "name": "Aarambh  The Starter Collection |    6 Incense Sticks | 1 Pack",
+                    "variant_inventory_management": "shopify",
+                    "properties": [],
+                    "product_exists": true,
+                    "fulfillable_quantity": 0,
+                    "grams": 0,
+                    "price": "99.00",
+                    "total_discount": "0.00",
+                    "fulfillment_status": "fulfilled",
+                    "price_set": {
+                        "shop_money": {
+                            "amount": "99.00",
+                            "currency_code": "INR"
+                        },
+                        "presentment_money": {
+                            "amount": "99.00",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "total_discount_set": {
+                        "shop_money": {
+                            "amount": "0.00",
+                            "currency_code": "INR"
+                        },
+                        "presentment_money": {
+                            "amount": "0.00",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "discount_allocations": [],
+                    "duties": [],
+                    "admin_graphql_api_id": "gid://shopify/LineItem/14664196161693",
+                    "tax_lines": []
+                }
+            ],
+            "tracking_number": null,
+            "tracking_numbers": [],
+            "tracking_url": null,
+            "tracking_urls": [],
+            "receipt": {},
+            "name": "#1919.2",
+            "admin_graphql_api_id": "gid://shopify/Fulfillment/5854331273373"
+        },
+        "webhookUrl": "https://backend-n8n.lhs56u.easypanel.host/webhook/stomatal-order-confirmation",
+        "executionMode": "production"
+    }
+]

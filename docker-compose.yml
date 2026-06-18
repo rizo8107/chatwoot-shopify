@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  chatwoot-automation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chatwoot-automation
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=3000
+      - DATA_DIR=/app/data
+      - CHATWOOT_API_URL=https://chat.stomatalfarms.com
+      - CHATWOOT_API_TOKEN=UeRKJ8tojfJBUT2iqL27415m
+      - CHATWOOT_ACCOUNT_ID=1
+      - CHATWOOT_INBOX_ID=1
+      - WHATSAPP_TEMPLATE_NAME=order_confirmation_01
+    restart: unless-stopped

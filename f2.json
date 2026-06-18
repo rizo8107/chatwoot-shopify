@@ -1,0 +1,120 @@
+[
+    {
+        "headers": {
+            "host": "backend-n8n.lhs56u.easypanel.host",
+            "user-agent": "Shopify-Captain-Hook",
+            "content-length": "1987",
+            "accept": "*/*",
+            "accept-encoding": "gzip;q=1.0,deflate;q=0.6,identity;q=0.3",
+            "content-type": "application/json",
+            "x-forwarded-for": "35.196.233.247",
+            "x-forwarded-host": "backend-n8n.lhs56u.easypanel.host",
+            "x-forwarded-port": "443",
+            "x-forwarded-proto": "https",
+            "x-forwarded-server": "217e8a4b56bf",
+            "x-real-ip": "35.196.233.247",
+            "x-shopify-api-version": "2026-07",
+            "x-shopify-event-id": "04d605e2-5105-4ae4-9dac-3b97d7320d36",
+            "x-shopify-fulfillment-id": "5854329307293",
+            "x-shopify-hmac-sha256": "ZTPBR4Wupj5CkyY3EkNJFzQbCR7AQI/D4J9sznHSY4M=",
+            "x-shopify-shop-domain": "nvhu9m-0r.myshopify.com",
+            "x-shopify-topic": "fulfillments/update",
+            "x-shopify-triggered-at": "2026-06-17T04:48:17.067423786Z",
+            "x-shopify-webhook-id": "eb79930f-9267-5e6d-895c-de3dea0f7113"
+        },
+        "params": {},
+        "query": {},
+        "body": {
+            "id": 5854329307293,
+            "order_id": 6531995369629,
+            "status": "success",
+            "created_at": "2026-06-17T10:17:50+05:30",
+            "service": "manual",
+            "updated_at": "2026-06-17T10:18:17+05:30",
+            "tracking_company": "India Post Domestic",
+            "shipment_status": null,
+            "location_id": 82160615581,
+            "origin_address": null,
+            "email": "vishnugaurisainath@gmail.com",
+            "destination": {
+                "first_name": "Lakshman",
+                "address1": "Shatabdi Vihar Apartment",
+                "phone": "8610554711",
+                "city": "Noida",
+                "zip": "201307",
+                "province": "Uttar Pradesh",
+                "country": "India",
+                "last_name": "Sainath",
+                "address2": "Flat Nr 11a Block E  Shatabdi Vihar",
+                "company": null,
+                "latitude": 28.5881264,
+                "longitude": 77.3648862,
+                "name": "Lakshman Sainath",
+                "country_code": "IN",
+                "province_code": "UP"
+            },
+            "line_items": [
+                {
+                    "id": 14671084093597,
+                    "variant_id": 47450556792989,
+                    "title": "Aurora’s Balance Combo – Incense Stick + Incense Cup (Dasangam, Floral, Lemongrass)",
+                    "quantity": 1,
+                    "sku": null,
+                    "variant_title": null,
+                    "vendor": "Stomatal Farms",
+                    "fulfillment_service": "manual",
+                    "product_id": 8792608112797,
+                    "requires_shipping": false,
+                    "taxable": true,
+                    "gift_card": false,
+                    "name": "Aurora’s Balance Combo – Incense Stick + Incense Cup (Dasangam, Floral, Lemongrass)",
+                    "variant_inventory_management": "shopify",
+                    "properties": [],
+                    "product_exists": true,
+                    "fulfillable_quantity": 0,
+                    "grams": 0,
+                    "price": "1242.00",
+                    "total_discount": "0.00",
+                    "fulfillment_status": "fulfilled",
+                    "price_set": {
+                        "shop_money": {
+                            "amount": "1242.00",
+                            "currency_code": "INR"
+                        },
+                        "presentment_money": {
+                            "amount": "1242.00",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "total_discount_set": {
+                        "shop_money": {
+                            "amount": "0.00",
+                            "currency_code": "INR"
+                        },
+                        "presentment_money": {
+                            "amount": "0.00",
+                            "currency_code": "INR"
+                        }
+                    },
+                    "discount_allocations": [],
+                    "duties": [],
+                    "admin_graphql_api_id": "gid://shopify/LineItem/14671084093597",
+                    "tax_lines": []
+                }
+            ],
+            "tracking_number": "CT200646815IN",
+            "tracking_numbers": [
+                "CT200646815IN"
+            ],
+            "tracking_url": "https://www.indiapost.gov.in/",
+            "tracking_urls": [
+                "https://www.indiapost.gov.in/"
+            ],
+            "receipt": {},
+            "name": "#1934.1",
+            "admin_graphql_api_id": "gid://shopify/Fulfillment/5854329307293"
+        },
+        "webhookUrl": "https://backend-n8n.lhs56u.easypanel.host/webhook/stomatal-order-confirmation",
+        "executionMode": "production"
+    }
+]

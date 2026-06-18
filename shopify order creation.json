@@ -1,0 +1,33 @@
+{
+  "id": 123456789,
+  "email": "customer@example.com",
+  "created_at": "2026-06-18T15:21:47Z",
+  "total_price": "199.99",
+  "order_number": 1986,
+  "name": "#1986",
+  "order_status_url": "https://pay.stomatalfarms.com/73544695965/account/orders/893a2867de7e26a4a649a0b3f492fc7e?",
+  "customer": {
+    "first_name": "Anuradha",
+    "last_name": "Anu",
+    "phone": "+919941569662",
+    "email": "customer@example.com"
+  },
+  "billing_address": {
+    "first_name": "Anuradha",
+    "last_name": "Anu",
+    "phone": "+919941569662"
+  },
+  "shipping_address": {
+    "first_name": "Anuradha",
+    "last_name": "Anu",
+    "phone": "+919941569662",
+    "city": "Bengaluru"
+  },
+  "line_items": [
+    {
+      "name": "Organic Fertilizer Booster",
+      "quantity": 1,
+      "price": "199.99"
+    }
+  ]
+}

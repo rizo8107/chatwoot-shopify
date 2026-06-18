@@ -1,0 +1,19 @@
+{
+  "name": "chatwoot-webhook-dashboard",
+  "version": "1.0.0",
+  "description": "Chatwoot Shopify Webhook Automation Server & React Dashboard",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "install:all": "npm install && npm install --prefix server && npm install --prefix client",
+    "build:client": "npm run build --prefix client",
+    "start": "node server/index.js",
+    "dev:server": "nodemon server/index.js",
+    "dev:client": "npm run dev --prefix client",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.1.0"
+  }
+}
