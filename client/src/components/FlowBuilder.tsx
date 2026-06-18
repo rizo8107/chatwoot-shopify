@@ -331,7 +331,13 @@ function FlowEditor({ flow, onBack, onSaved }: { flow: Flow | null; onBack: () =
   const save = async () => {
     setSaving(true);
     const triggerNode = nodes.find(n => n.type === 'trigger');
-    const triggerEvent = (triggerNode?.data as any)?.event || 'orders/create';
+    if (!triggerNode) {
+      setSaveMsg('Error: A Trigger node is required to save the flow.');
+      setSaving(false);
+      setTimeout(() => setSaveMsg(''), 4000);
+      return;
+    }
+    const triggerEvent = (triggerNode.data as any)?.event || 'orders/create';
     try {
       const res = await fetch(`${API}/flows`, {
         method: 'POST',
