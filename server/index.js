@@ -1,8 +1,16 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import crypto from 'node:crypto';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+
+import {
+  isValidShop, normalizeShop, buildInstallUrl, verifyHmac,
+  exchangeToken, registerWebhooks, fetchAbandonedCheckouts
+} from './shopify.js';
+
+import { fetchChatwootContacts, importContacts } from './contacts.js';
 
 import {
   initDb,
@@ -215,6 +223,139 @@ app.get('/api/shopify/checkout/:token', async (req, res) => {
 
     if (!shopifyRes.ok) return res.status(shopifyRes.status).json({ error: `Shopify error: ${shopifyRes.status}`, detail: body });
     res.json(body);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Shopify OAuth (Connect store → Admin API token) ──────────────────────
+
+// Short-lived CSRF state store for the OAuth round-trip (single instance).
+const oauthStates = new Map();
+function rememberState(state, shop) {
+  oauthStates.set(state, { shop, exp: Date.now() + 10 * 60_000 });
+}
+function consumeState(state) {
+  const entry = oauthStates.get(state);
+  oauthStates.delete(state);
+  if (!entry || entry.exp < Date.now()) return null;
+  return entry;
+}
+
+function appBaseUrl(req, settings) {
+  return (settings.SHOPIFY_APP_URL || process.env.WEBHOOK_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+}
+
+// Connection status for the Settings UI
+app.get('/api/shopify/status', async (req, res) => {
+  try {
+    const s = await getAllSettings();
+    res.json({
+      connected: !!(s.SHOPIFY_STORE_URL && s.SHOPIFY_ADMIN_TOKEN),
+      shop: s.SHOPIFY_STORE_URL || '',
+      scopes: s.SHOPIFY_SCOPES || '',
+      hasCredentials: !!(s.SHOPIFY_API_KEY && s.SHOPIFY_API_SECRET)
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Step 1: begin OAuth — redirect the merchant to Shopify's consent screen
+app.get('/api/shopify/auth', async (req, res) => {
+  try {
+    const settings = await getAllSettings();
+    const shop = normalizeShop(req.query.shop || settings.SHOPIFY_STORE_URL);
+    const apiKey = settings.SHOPIFY_API_KEY;
+    const scopes = settings.SHOPIFY_SCOPES || 'read_orders,read_checkouts,read_fulfillments';
+
+    if (!apiKey || !settings.SHOPIFY_API_SECRET) {
+      return res.status(400).send('Shopify API key/secret not set. Add them in Settings first.');
+    }
+    if (!isValidShop(shop)) {
+      return res.status(400).send('Invalid shop domain. Expected something like your-store.myshopify.com');
+    }
+
+    const state = crypto.randomBytes(16).toString('hex');
+    rememberState(state, shop);
+    const redirectUri = `${appBaseUrl(req, settings)}/api/shopify/auth/callback`;
+    res.redirect(buildInstallUrl({ shop, apiKey, scopes, redirectUri, state }));
+  } catch (err) { res.status(500).send(`OAuth start failed: ${err.message}`); }
+});
+
+// Step 2: OAuth callback — verify, exchange code for token, store it, register webhooks
+app.get('/api/shopify/auth/callback', async (req, res) => {
+  try {
+    const settings = await getAllSettings();
+    const { shop, code, state } = req.query;
+
+    if (!verifyHmac(req.query, settings.SHOPIFY_API_SECRET)) {
+      return res.status(401).send('HMAC validation failed.');
+    }
+    const remembered = consumeState(state);
+    if (!remembered || remembered.shop !== shop) {
+      return res.status(403).send('Invalid or expired OAuth state.');
+    }
+    if (!isValidShop(shop) || !code) {
+      return res.status(400).send('Invalid OAuth callback parameters.');
+    }
+
+    const { accessToken, scope } = await exchangeToken({
+      shop, apiKey: settings.SHOPIFY_API_KEY, apiSecret: settings.SHOPIFY_API_SECRET, code
+    });
+
+    await saveSettings({ SHOPIFY_STORE_URL: shop, SHOPIFY_ADMIN_TOKEN: accessToken, SHOPIFY_SCOPES: scope });
+
+    // Best-effort webhook registration (don't fail the connect if this errors)
+    let webhooks = [];
+    try { webhooks = await registerWebhooks({ shop, token: accessToken, appUrl: appBaseUrl(req, settings) }); }
+    catch (e) { console.error('[Shopify] Webhook registration error:', e.message); }
+    console.log(`[Shopify] Connected ${shop} — webhooks:`, webhooks.map(w => `${w.topic}:${w.ok ? 'ok' : 'fail'}`).join(', '));
+
+    res.redirect('/?shopify=connected');
+  } catch (err) {
+    console.error('[Shopify] OAuth callback failed:', err.message);
+    res.status(500).send(`Shopify connect failed: ${err.message}`);
+  }
+});
+
+// Disconnect — clear the stored token
+app.post('/api/shopify/disconnect', async (req, res) => {
+  try {
+    await saveSettings({ SHOPIFY_ADMIN_TOKEN: '' });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Read abandoned checkouts via the connected store's Admin API
+app.get('/api/shopify/abandoned-checkouts', async (req, res) => {
+  try {
+    const s = await getAllSettings();
+    const shop = normalizeShop(s.SHOPIFY_STORE_URL);
+    if (!shop || !s.SHOPIFY_ADMIN_TOKEN) {
+      return res.status(400).json({ error: 'Shopify not connected. Connect a store in Settings first.' });
+    }
+    const limit = Math.min(parseInt(req.query.limit || '50', 10), 250);
+    const checkouts = await fetchAbandonedCheckouts({ shop, token: s.SHOPIFY_ADMIN_TOKEN, limit });
+    res.json({ count: checkouts.length, checkouts });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Chatwoot Contacts (segmentation + import) ────────────────────────────
+
+// Fetch contacts from Chatwoot for segmentation (client applies filters)
+app.get('/api/chatwoot/contacts', async (req, res) => {
+  try {
+    const settings = await getAllSettings();
+    const contacts = await fetchChatwootContacts({ settings, maxPages: req.query.maxPages || 20 });
+    res.json({ count: contacts.length, contacts });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Bulk-create contacts in Chatwoot from CSV rows [{ name, phone, email }]
+app.post('/api/chatwoot/contacts/import', async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (rows.length === 0) return res.status(400).json({ error: 'No contact rows provided' });
+    const settings = await getAllSettings();
+    const result = await importContacts({ settings, rows });
+    res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

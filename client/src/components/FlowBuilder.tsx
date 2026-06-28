@@ -160,6 +160,12 @@ function NodeConfigPanel({ node, onChange, onDelete }: { node: Node; onChange: (
   const d = node.data as any;
   const set = (key: string, val: any) => onChange({ ...d, [key]: val });
 
+  const [templates, setTemplates] = useState<{ name: string; language: string; category: string; paramCount: number }[]>([]);
+  useEffect(() => {
+    if (node.type !== 'whatsapp') return;
+    fetch(`${API}/whatsapp/templates`).then(r => r.json()).then(t => setTemplates(Array.isArray(t) ? t : [])).catch(() => {});
+  }, [node.type]);
+
   return (
     <div className="flow-config-panel">
       <div className="flow-config-header">
@@ -237,8 +243,15 @@ function NodeConfigPanel({ node, onChange, onDelete }: { node: Node; onChange: (
           <>
             <div className="form-group">
               <label className="form-label">Template Name</label>
+              {templates.length > 0 && (
+                <select className="select" style={{ marginBottom: 6 }} value={templates.some(t => t.name === d.templateName) ? d.templateName : ''}
+                  onChange={e => { if (e.target.value) set('templateName', e.target.value); }}>
+                  <option value="">— pick a template from Chatwoot —</option>
+                  {templates.map(t => <option key={t.name} value={t.name}>{t.name} · {t.language} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}</option>)}
+                </select>
+              )}
               <input className="input" value={d.templateName || ''} onChange={e => set('templateName', e.target.value)} placeholder="e.g. abandoned_cart_01" />
-              <div className="form-hint">Exact template name from Chatwoot / WhatsApp Business.</div>
+              <div className="form-hint">Pick from Chatwoot, or type the exact template name.</div>
             </div>
             <div className="form-group">
               <label className="form-label">Variable Mapping</label>

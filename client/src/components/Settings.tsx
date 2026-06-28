@@ -15,6 +15,10 @@ interface Settings {
   WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING: string;
   SHOPIFY_STORE_URL: string;
   SHOPIFY_ADMIN_TOKEN: string;
+  SHOPIFY_API_KEY: string;
+  SHOPIFY_API_SECRET: string;
+  SHOPIFY_SCOPES: string;
+  SHOPIFY_APP_URL: string;
   WEBHOOK_MAX_RETRIES: string;
   [key: string]: string;
 }
@@ -31,12 +35,15 @@ const EMPTY: Settings = {
   WHATSAPP_SHIPPING_TEMPLATE_NAME: '', WHATSAPP_SHIPPING_TEMPLATE_MAPPING: '',
   WHATSAPP_ABANDONED_CART_TEMPLATE_NAME: '', WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING: '',
   SHOPIFY_STORE_URL: '', SHOPIFY_ADMIN_TOKEN: '',
+  SHOPIFY_API_KEY: '', SHOPIFY_API_SECRET: '', SHOPIFY_SCOPES: 'read_orders,read_checkouts,read_fulfillments', SHOPIFY_APP_URL: '',
   WEBHOOK_MAX_RETRIES: '3',
 };
 
-function MappingInput({ label, hint, mappingKey, templateKey, settings, onChange }: {
+interface TemplateInfo { name: string; language: string; category: string; paramCount: number; body: string; }
+
+function MappingInput({ label, hint, mappingKey, templateKey, settings, onChange, templates }: {
   label: string; hint: string; mappingKey: string; templateKey: string;
-  settings: Settings; onChange: (k: string, v: string) => void;
+  settings: Settings; onChange: (k: string, v: string) => void; templates: TemplateInfo[];
 }) {
   const addField = (field: string) => {
     if (!field) return;
@@ -55,6 +62,13 @@ function MappingInput({ label, hint, mappingKey, templateKey, settings, onChange
     <div>
       <div className="form-group">
         <label className="form-label">{templateKey.replace(/_/g, ' ').replace('WHATSAPP ', '')}</label>
+        {templates.length > 0 && (
+          <select className="select" style={{ marginBottom: 6 }} value={templates.some(t => t.name === settings[templateKey]) ? settings[templateKey] : ''}
+            onChange={e => { if (e.target.value) onChange(templateKey, e.target.value); }}>
+            <option value="">— pick a template from Chatwoot —</option>
+            {templates.map(t => <option key={t.name} value={t.name}>{t.name} · {t.language} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}</option>)}
+          </select>
+        )}
         <input className="input" value={settings[templateKey] || ''} onChange={e => onChange(templateKey, e.target.value)} placeholder="e.g. order_confirmation_01" />
       </div>
       <div className="form-group">
@@ -100,15 +114,42 @@ export const Settings: React.FC = () => {
   const [msg, setMsg] = useState('');
   const [showToken, setShowToken] = useState(false);
   const [showShopifyToken, setShowShopifyToken] = useState(false);
+  const [showShopifySecret, setShowShopifySecret] = useState(false);
+  const [shopStatus, setShopStatus] = useState<{ connected: boolean; shop: string; scopes: string; hasCredentials: boolean } | null>(null);
+  const [templates, setTemplates] = useState<TemplateInfo[]>([]);
+
+  const loadStatus = () => {
+    fetch(`${API}/shopify/status`).then(r => r.json()).then(setShopStatus).catch(() => {});
+  };
 
   useEffect(() => {
     fetch(`${API}/settings`)
       .then(r => r.json())
       .then(d => { setSettings({ ...EMPTY, ...d }); setLoading(false); })
       .catch(() => setLoading(false));
+    loadStatus();
+    fetch(`${API}/whatsapp/templates`).then(r => r.json()).then(d => setTemplates(Array.isArray(d) ? d : [])).catch(() => {});
+    if (new URLSearchParams(window.location.search).get('shopify') === 'connected') {
+      setMsg('Shopify connected ✓');
+      setTimeout(() => setMsg(''), 4000);
+    }
   }, []);
 
   const set = (k: string, v: string) => setSettings(s => ({ ...s, [k]: v }));
+
+  const connectShopify = async () => {
+    // Persist credentials first so the OAuth start route can read them
+    await fetch(`${API}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+    const shop = encodeURIComponent(settings.SHOPIFY_STORE_URL || '');
+    window.location.href = `${API}/shopify/auth?shop=${shop}`;
+  };
+
+  const disconnectShopify = async () => {
+    if (!confirm('Disconnect the Shopify store? The stored access token will be cleared.')) return;
+    await fetch(`${API}/shopify/disconnect`, { method: 'POST' });
+    setSettings(s => ({ ...s, SHOPIFY_ADMIN_TOKEN: '' }));
+    loadStatus();
+  };
 
   const save = async () => {
     setSaving(true);
@@ -187,9 +228,22 @@ export const Settings: React.FC = () => {
       <div className="card mb-4">
         <div className="card-header">
           <div>
-            <div className="card-title">🛍 Shopify Admin API</div>
-            <div className="card-sub">Required for Fetch Shopify nodes in flows</div>
+            <div className="card-title">🛍 Shopify</div>
+            <div className="card-sub">Connect your store via OAuth to read orders & abandoned checkouts and auto-register webhooks</div>
           </div>
+          {shopStatus && (
+            <span className={`badge ${shopStatus.connected ? 'success' : 'pending'}`}>
+              <span className="badge-dot" />{shopStatus.connected ? `Connected: ${shopStatus.shop}` : 'Not connected'}
+            </span>
+          )}
+        </div>
+
+        {/* OAuth credentials */}
+        <div className="divider-label mb-4"><span>OAuth App Credentials</span></div>
+        <div className="callout info mb-4" style={{ display: 'block' }}>
+          Create a custom app in your Shopify admin (<b>Settings → Apps → Develop apps</b>) or a Partner app, copy its
+          <b> API key</b> &amp; <b>API secret</b> here, and add this redirect URL to the app's allowed URLs:
+          <div className="font-mono text-sm mt-2">{(settings.SHOPIFY_APP_URL || window.location.origin)}/api/shopify/auth/callback</div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 20px' }}>
           <div className="form-group">
@@ -198,18 +252,55 @@ export const Settings: React.FC = () => {
             <div className="form-hint">Without https:// prefix</div>
           </div>
           <div className="form-group">
-            <label className="form-label">Admin API Access Token</label>
+            <label className="form-label">App URL (public base)</label>
+            <input className="input" value={settings.SHOPIFY_APP_URL} onChange={e => set('SHOPIFY_APP_URL', e.target.value)} placeholder="https://flow.stomatalfarms.com" />
+            <div className="form-hint">Where this dashboard is hosted (used to build the redirect URL)</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">API Key</label>
+            <input className="input" value={settings.SHOPIFY_API_KEY} onChange={e => set('SHOPIFY_API_KEY', e.target.value)} placeholder="Client ID" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">API Secret</label>
             <div style={{ display: 'flex', gap: 6 }}>
-              <input className="input" type={showShopifyToken ? 'text' : 'password'} value={settings.SHOPIFY_ADMIN_TOKEN} onChange={e => set('SHOPIFY_ADMIN_TOKEN', e.target.value)} placeholder="shpat_..." style={{ flex: 1 }} />
-              <button className="btn btn-secondary btn-sm btn-icon" onClick={() => setShowShopifyToken(s => !s)}>
-                {showShopifyToken
+              <input className="input" type={showShopifySecret ? 'text' : 'password'} value={settings.SHOPIFY_API_SECRET} onChange={e => set('SHOPIFY_API_SECRET', e.target.value)} placeholder="Client secret" style={{ flex: 1 }} />
+              <button className="btn btn-secondary btn-sm btn-icon" onClick={() => setShowShopifySecret(s => !s)}>
+                {showShopifySecret
                   ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                   : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                 }
               </button>
             </div>
-            <div className="form-hint">Needs read_orders and read_checkouts scopes</div>
           </div>
+          <div className="form-group">
+            <label className="form-label">Scopes</label>
+            <input className="input" value={settings.SHOPIFY_SCOPES} onChange={e => set('SHOPIFY_SCOPES', e.target.value)} placeholder="read_orders,read_checkouts,read_fulfillments" />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 mb-4">
+          <button className="btn btn-primary" onClick={connectShopify} disabled={!settings.SHOPIFY_STORE_URL || !settings.SHOPIFY_API_KEY || !settings.SHOPIFY_API_SECRET}>
+            {shopStatus?.connected ? 'Reconnect Shopify' : 'Connect Shopify'}
+          </button>
+          {shopStatus?.connected && <button className="btn btn-secondary" onClick={disconnectShopify}>Disconnect</button>}
+          <span className="text-dim text-sm">Saves credentials, then redirects to Shopify to authorize.</span>
+        </div>
+
+        {/* Manual token fallback */}
+        <div className="divider" />
+        <div className="divider-label mb-4"><span>Manual Admin Token (optional fallback)</span></div>
+        <div className="form-group" style={{ maxWidth: '50%' }}>
+          <label className="form-label">Admin API Access Token</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input className="input" type={showShopifyToken ? 'text' : 'password'} value={settings.SHOPIFY_ADMIN_TOKEN} onChange={e => set('SHOPIFY_ADMIN_TOKEN', e.target.value)} placeholder="shpat_... (set automatically after OAuth)" style={{ flex: 1 }} />
+            <button className="btn btn-secondary btn-sm btn-icon" onClick={() => setShowShopifyToken(s => !s)}>
+              {showShopifyToken
+                ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              }
+            </button>
+          </div>
+          <div className="form-hint">Auto-filled by OAuth. Only set manually if using a custom-app token instead.</div>
         </div>
       </div>
 
@@ -230,6 +321,7 @@ export const Settings: React.FC = () => {
           mappingKey="WHATSAPP_TEMPLATE_MAPPING"
           settings={settings}
           onChange={set}
+          templates={templates}
         />
 
         <div className="divider" />
@@ -241,6 +333,7 @@ export const Settings: React.FC = () => {
           mappingKey="WHATSAPP_SHIPPING_TEMPLATE_MAPPING"
           settings={settings}
           onChange={set}
+          templates={templates}
         />
 
         <div className="divider" />
@@ -252,6 +345,7 @@ export const Settings: React.FC = () => {
           mappingKey="WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING"
           settings={settings}
           onChange={set}
+          templates={templates}
         />
       </div>
 
