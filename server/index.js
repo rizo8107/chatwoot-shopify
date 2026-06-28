@@ -18,7 +18,16 @@ import {
   deleteFlow,
   toggleFlow,
   getFlowsByTrigger,
-  scheduleJob
+  scheduleJob,
+  createCampaign,
+  getCampaigns,
+  getCampaignById,
+  deleteCampaign,
+  startCampaign,
+  pauseCampaign,
+  retryFailedRecipients,
+  retryRecipient,
+  scheduleWebhookRetry
 } from './db.js';
 
 import {
@@ -26,7 +35,8 @@ import {
   extractOrderDetails,
   extractFulfillmentDetails,
   extractCheckoutDetails,
-  executeFlow
+  executeFlow,
+  normalizePhone
 } from './chatwoot.js';
 
 import { startScheduler } from './scheduler.js';
@@ -44,6 +54,22 @@ const PORT = process.env.PORT || 3000;
 
 function genId(prefix = 'tx') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// Queue a failed webhook/flow execution for automatic retry (first attempt in 1 min).
+async function queueRetry(transactionId, rawBody, topic, flowId) {
+  try {
+    const settings = await getAllSettings();
+    const max = parseInt(settings.WEBHOOK_MAX_RETRIES ?? '3', 10);
+    if (!max || max <= 0) return;
+    await scheduleWebhookRetry({
+      transaction_id: transactionId, payload: rawBody, topic,
+      flow_id: flowId || null, run_at: new Date(Date.now() + 60_000).toISOString(), max_attempts: max
+    });
+    console.log(`[Webhook] Queued auto-retry for ${transactionId} (max ${max})`);
+  } catch (err) {
+    console.error('[Webhook] Failed to queue retry:', err.message);
+  }
 }
 
 // ─── Metrics ──────────────────────────────────────────────────────────────
@@ -69,6 +95,40 @@ app.get('/api/transactions/:id', async (req, res) => {
     const item = await getTransactionById(req.params.id);
     if (!item) return res.status(404).json({ error: 'Transaction not found' });
     res.json(item);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Retry a failed message from the Logs view.
+//  • campaign messages  → requeue the recipient
+//  • webhook/flow/test  → re-run from the original payload stored in the steps
+app.post('/api/transactions/:id/retry', async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (id.startsWith('cmp_')) {
+      await retryRecipient(id.slice('cmp_'.length));
+      return res.json({ success: true });
+    }
+
+    const tx = await getTransactionById(id);
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+
+    const steps = Array.isArray(tx.steps) ? tx.steps : [];
+    const extract = steps.find(s => s.name === 'Extract Details');
+    const rawBody = extract?.request?.body;
+    const topic = extract?.request?.topic || 'orders/create';
+
+    if (rawBody) {
+      const result = await executePipeline(rawBody, topic);
+      await logTransaction({
+        id, flow_id: tx.flow_id || null,
+        order_number: tx.order_number, customer_name: tx.customer_name, phone_number: tx.phone_number,
+        status: result.status, type: tx.type || 'webhook', steps: result.steps, error_message: result.errorMessage || null
+      });
+      return res.json({ success: result.status === 'success', status: result.status, error: result.errorMessage });
+    }
+
+    return res.status(400).json({ error: 'No stored payload to retry this message. Re-send it from the Test Console.' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -237,6 +297,7 @@ app.post('/api/webhook/shopify', async (req, res) => {
               status: result.status, type: 'flow', steps: result.steps, error_message: result.errorMessage || null
             });
             console.log(`[Webhook] Flow ${flow.id}: ${result.status}`);
+            if (result.status === 'failed') await queueRetry(flowTxId, rawBody, topic, flow.id);
           }
         })
         .catch(async (err) => {
@@ -246,6 +307,7 @@ app.post('/api/webhook/shopify', async (req, res) => {
             order_number: details.orderNumber, customer_name: details.fullName, phone_number: details.phone,
             status: 'failed', type: 'flow', steps: [], error_message: err.message
           });
+          await queueRetry(flowTxId, rawBody, topic, flow.id);
         });
     }
   } else {
@@ -263,6 +325,7 @@ app.post('/api/webhook/shopify', async (req, res) => {
           order_number: details.orderNumber, customer_name: details.fullName, phone_number: details.phone,
           status: result.status, type: 'webhook', steps: result.steps, error_message: result.errorMessage || null
         });
+        if (result.status === 'failed') await queueRetry(transactionId, rawBody, topic, null);
       })
       .catch(async (err) => {
         await logTransaction({
@@ -270,6 +333,7 @@ app.post('/api/webhook/shopify', async (req, res) => {
           order_number: details.orderNumber, customer_name: details.fullName, phone_number: details.phone,
           status: 'failed', type: 'webhook', steps: [], error_message: err.message
         });
+        await queueRetry(transactionId, rawBody, topic, null);
       });
   }
 });
@@ -322,6 +386,122 @@ app.post('/api/test-flow/:flowId', async (req, res) => {
     await logTransaction({ id: transactionId, flow_id: flowId, order_number: details.orderNumber, customer_name: details.fullName, phone_number: details.phone, status: 'failed', type: 'test', steps: [], error_message: err.message });
     res.status(500).json({ success: false, id: transactionId, error: err.message });
   }
+});
+
+// ─── WhatsApp Templates (from Chatwoot inbox) ─────────────────────────────
+
+app.get('/api/whatsapp/templates', async (req, res) => {
+  try {
+    const settings = await getAllSettings();
+    const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
+    const token = settings.CHATWOOT_API_TOKEN;
+    const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
+    const inboxId = settings.CHATWOOT_INBOX_ID || '1';
+    if (!apiBaseUrl || !token) return res.status(400).json({ error: 'Chatwoot API not configured in Settings' });
+
+    const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`;
+    const r = await fetch(url, { headers: { api_access_token: token } });
+    const body = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: `Chatwoot error ${r.status}`, detail: body });
+
+    const raw = body.message_templates || body.payload?.message_templates || [];
+    const templates = raw.map(t => {
+      const bodyComp = (t.components || []).find(c => (c.type || '').toUpperCase() === 'BODY');
+      const text = bodyComp?.text || '';
+      const paramCount = (text.match(/\{\{\s*\d+\s*\}\}/g) || []).length;
+      return {
+        name: t.name,
+        language: t.language || 'en',
+        category: (t.category || 'UTILITY').toUpperCase(),
+        status: t.status || '',
+        paramCount,
+        body: text
+      };
+    });
+    res.json(templates);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Campaigns ────────────────────────────────────────────────────────────
+
+app.get('/api/campaigns', async (req, res) => {
+  try { res.json(await getCampaigns()); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/campaigns/:id', async (req, res) => {
+  try {
+    const campaign = await getCampaignById(req.params.id);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    res.json(campaign);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/campaigns', async (req, res) => {
+  try {
+    const { name, delay_seconds, template_name, language, category, phone_column, name_column, param_mapping, rows, autostart } = req.body;
+
+    if (!name) return res.status(400).json({ error: 'Campaign name is required' });
+    if (!phone_column) return res.status(400).json({ error: 'A phone column must be selected' });
+    if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'No recipients found in the CSV' });
+
+    const settings = await getAllSettings();
+    const tmplName = template_name || settings.WHATSAPP_TEMPLATE_NAME || '';
+    if (!tmplName) return res.status(400).json({ error: 'No WhatsApp template name — set one in Settings or the campaign form' });
+
+    const mapping = Array.isArray(param_mapping) ? param_mapping : [];
+    const recipients = rows.map((row, i) => {
+      const { formattedPhone } = normalizePhone(row[phone_column], '');
+      const variables = {};
+      mapping.forEach((col, idx) => { variables[String(idx + 1)] = col ? String(row[col] ?? '') : ''; });
+      return {
+        row_index: i,
+        phone: formattedPhone,
+        name: name_column ? String(row[name_column] ?? '') : '',
+        variables
+      };
+    });
+
+    const id = genId('cmp');
+    await createCampaign({
+      id, name,
+      template_name: tmplName,
+      language: language || 'en',
+      category: category || 'UTILITY',
+      delay_seconds: parseInt(delay_seconds || 5, 10),
+      phone_column, name_column, param_mapping: mapping, recipients
+    });
+
+    if (autostart) await startCampaign(id);
+    res.json({ success: true, id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/campaigns/:id/start', async (req, res) => {
+  try { await startCampaign(req.params.id); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/campaigns/:id/pause', async (req, res) => {
+  try { await pauseCampaign(req.params.id); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/campaigns/:id/retry', async (req, res) => {
+  try {
+    const count = await retryFailedRecipients(req.params.id);
+    res.json({ success: true, retried: count });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/campaigns/:id/recipients/:rid/retry', async (req, res) => {
+  try { await retryRecipient(req.params.rid); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/campaigns/:id', async (req, res) => {
+  try { await deleteCampaign(req.params.id); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ─── Serve Frontend ───────────────────────────────────────────────────────

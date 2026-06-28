@@ -123,6 +123,15 @@ export const Logs: React.FC = () => {
 
   useEffect(() => { load(); }, [statusFilter]);
 
+  const retry = async (id: string) => {
+    try {
+      const res = await fetch(`${API}/transactions/${id}/retry`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) { alert(data.error || 'Retry failed'); return; }
+      setTimeout(load, 600);
+    } catch (err: any) { alert(err.message); }
+  };
+
   const filtered = transactions.filter(tx => {
     if (!search) return true;
     const q = search.toLowerCase();
@@ -199,9 +208,14 @@ export const Logs: React.FC = () => {
                       </td>
                       <td className="muted" style={{ fontSize: 12 }}>{timeAgo(tx.created_at)}</td>
                       <td>
-                        <button className="btn btn-ghost btn-sm btn-icon">
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transition: 'transform 0.2s', transform: expanded === tx.id ? 'rotate(180deg)' : 'none' }}><path d="m6 9 6 6 6-6"/></svg>
-                        </button>
+                        <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                          {tx.status === 'failed' && (
+                            <button className="btn btn-secondary btn-sm" onClick={e => { e.stopPropagation(); retry(tx.id); }}>Retry</button>
+                          )}
+                          <button className="btn btn-ghost btn-sm btn-icon">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transition: 'transform 0.2s', transform: expanded === tx.id ? 'rotate(180deg)' : 'none' }}><path d="m6 9 6 6 6-6"/></svg>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                     {expanded === tx.id && (

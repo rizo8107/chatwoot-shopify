@@ -4,8 +4,9 @@ import { FlowBuilder } from './components/FlowBuilder';
 import { Logs } from './components/Logs';
 import { Settings } from './components/Settings';
 import { TestConsole } from './components/TestConsole';
+import { Campaigns } from './components/Campaigns';
 
-type Tab = 'dashboard' | 'flows' | 'logs' | 'settings' | 'test';
+type Tab = 'dashboard' | 'flows' | 'campaigns' | 'logs' | 'settings' | 'test';
 
 const NAV = [
   {
@@ -25,6 +26,15 @@ const NAV = [
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="5" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/>
         <path d="M5 8v2a4 4 0 0 0 4 4h2"/><path d="M14 12h2a4 4 0 0 1 4 4v2"/><path d="M21 8V6"/>
+      </svg>
+    )
+  },
+  {
+    id: 'campaigns' as Tab,
+    label: 'Campaigns',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>
       </svg>
     )
   },
@@ -66,6 +76,7 @@ const App: React.FC = () => {
     switch (tab) {
       case 'dashboard': return <Dashboard onNavigate={setTab} />;
       case 'flows': return <FlowBuilder />;
+      case 'campaigns': return <Campaigns />;
       case 'logs': return <Logs />;
       case 'test': return <TestConsole />;
       case 'settings': return <Settings />;

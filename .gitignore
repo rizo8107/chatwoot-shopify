@@ -8,3 +8,19 @@ server/data/
 .DS_Store
 dist/
 build/
+
+# InsForge & AI agent skills
+.mcp.json
+.insforge
+.agent
+.agents
+.augment
+.claude
+.cline
+.github/copilot*
+.kilocode
+.qoder
+.qwen
+.roo
+.trae
+.windsurf

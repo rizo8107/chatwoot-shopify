@@ -15,6 +15,7 @@ interface Settings {
   WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING: string;
   SHOPIFY_STORE_URL: string;
   SHOPIFY_ADMIN_TOKEN: string;
+  WEBHOOK_MAX_RETRIES: string;
   [key: string]: string;
 }
 
@@ -30,6 +31,7 @@ const EMPTY: Settings = {
   WHATSAPP_SHIPPING_TEMPLATE_NAME: '', WHATSAPP_SHIPPING_TEMPLATE_MAPPING: '',
   WHATSAPP_ABANDONED_CART_TEMPLATE_NAME: '', WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING: '',
   SHOPIFY_STORE_URL: '', SHOPIFY_ADMIN_TOKEN: '',
+  WEBHOOK_MAX_RETRIES: '3',
 };
 
 function MappingInput({ label, hint, mappingKey, templateKey, settings, onChange }: {
@@ -172,6 +174,11 @@ export const Settings: React.FC = () => {
           <div className="form-group">
             <label className="form-label">WhatsApp Inbox ID</label>
             <input className="input" value={settings.CHATWOOT_INBOX_ID} onChange={e => set('CHATWOOT_INBOX_ID', e.target.value)} placeholder="1" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Auto-retry failed webhooks</label>
+            <input className="input" type="number" min={0} value={settings.WEBHOOK_MAX_RETRIES} onChange={e => set('WEBHOOK_MAX_RETRIES', e.target.value)} placeholder="3" />
+            <div className="form-hint">Max automatic retries on failure (backoff 1m → 5m → 15m). Set 0 to disable.</div>
           </div>
         </div>
       </div>

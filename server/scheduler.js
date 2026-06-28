@@ -1,22 +1,38 @@
 import { getPendingJobs, markJobStatus, getFlowById, logTransaction, getTransactionById } from './db.js';
 import { executeFlowNode } from './chatwoot.js';
+import { processDueCampaignMessages } from './campaigns.js';
+import { processDueRetries } from './retries.js';
 
 let schedulerTimer = null;
+let campaignTimer = null;
+let retryTimer = null;
 
 export function startScheduler() {
-  if (schedulerTimer) return;
-  schedulerTimer = setInterval(runPendingJobs, 30_000);
-  console.log('[Scheduler] Started — polling every 30 seconds');
-  // Run once immediately on start to pick up any missed jobs
-  runPendingJobs().catch(err => console.error('[Scheduler] Initial run error:', err));
+  if (!schedulerTimer) {
+    schedulerTimer = setInterval(runPendingJobs, 30_000);
+    // Run once immediately on start to pick up any missed jobs
+    runPendingJobs().catch(err => console.error('[Scheduler] Initial run error:', err));
+  }
+  if (!campaignTimer) {
+    campaignTimer = setInterval(() => {
+      processDueCampaignMessages().catch(err => console.error('[Scheduler] Campaign tick error:', err.message));
+    }, 5_000);
+    processDueCampaignMessages().catch(err => console.error('[Scheduler] Campaign initial run error:', err.message));
+  }
+  if (!retryTimer) {
+    retryTimer = setInterval(() => {
+      processDueRetries().catch(err => console.error('[Scheduler] Retry tick error:', err.message));
+    }, 20_000);
+    processDueRetries().catch(err => console.error('[Scheduler] Retry initial run error:', err.message));
+  }
+  console.log('[Scheduler] Started — flow jobs 30s, campaigns 5s, retries 20s');
 }
 
 export function stopScheduler() {
-  if (schedulerTimer) {
-    clearInterval(schedulerTimer);
-    schedulerTimer = null;
-    console.log('[Scheduler] Stopped');
-  }
+  if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
+  if (campaignTimer) { clearInterval(campaignTimer); campaignTimer = null; }
+  if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
+  console.log('[Scheduler] Stopped');
 }
 
 async function runPendingJobs() {

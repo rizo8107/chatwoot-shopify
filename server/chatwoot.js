@@ -99,13 +99,118 @@ export function extractCheckoutDetails(body) {
   };
 }
 
-function normalizePhone(phone, fallbackSourceId) {
+export function normalizePhone(phone, fallbackSourceId) {
   let cleanPhone = String(phone || '').replace(/[\s\-().+]/g, '');
   if (cleanPhone.startsWith('0')) cleanPhone = '91' + cleanPhone.slice(1);
   else if (cleanPhone.length === 10) cleanPhone = '91' + cleanPhone;
   const sourceId = cleanPhone || fallbackSourceId;
   const formattedPhone = cleanPhone ? `+${cleanPhone}` : '';
   return { cleanPhone, formattedPhone, sourceId };
+}
+
+// ─── WhatsApp template body (so messages read like the real template) ────────
+
+let _templateCache = { at: 0, byName: {} };
+
+/**
+ * Fetch the inbox's approved templates and return the BODY text for a template
+ * by name (e.g. "Hi {{1}} 🙏 Order ID: {{2}} ..."). Cached for 60s.
+ */
+export async function getTemplateBody(settings, templateName) {
+  if (!templateName) return null;
+  const now = Date.now();
+  if (now - _templateCache.at > 60_000) {
+    try {
+      const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
+      const token = settings.CHATWOOT_API_TOKEN;
+      const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
+      const inboxId = settings.CHATWOOT_INBOX_ID || '1';
+      if (apiBaseUrl && token) {
+        const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`, { headers: { api_access_token: token } });
+        if (r.ok) {
+          const b = await r.json();
+          const raw = b.message_templates || b.payload?.message_templates || [];
+          const byName = {};
+          for (const t of raw) {
+            const comp = (t.components || []).find(c => (c.type || '').toUpperCase() === 'BODY');
+            byName[t.name] = comp?.text || '';
+          }
+          _templateCache = { at: now, byName };
+        }
+      }
+    } catch (_) { /* keep stale cache on failure */ }
+  }
+  return _templateCache.byName[templateName] || null;
+}
+
+/**
+ * Substitute {{1}}, {{2}}… in a template body with processed params
+ * ({ "1": "...", "2": "..." }). Unfilled placeholders are left as-is.
+ */
+export function renderTemplateBody(body, processedParams) {
+  if (!body) return null;
+  return body.replace(/\{\{\s*(\d+)\s*\}\}/g, (_, n) => {
+    const v = processedParams ? processedParams[String(n)] : undefined;
+    return (v === undefined || v === null || v === '') ? `{{${n}}}` : String(v);
+  });
+}
+
+// ─── Contact resolution (reuse existing contacts, don't fail on 422) ─────────
+
+async function searchContactBy(apiBaseUrl, accountId, token, q) {
+  if (!q) return null;
+  const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(q)}`, { headers: { api_access_token: token } });
+  if (!r.ok) return null;
+  const b = await r.json();
+  const list = Array.isArray(b) ? b : (b.payload || []);
+  return list.length > 0 ? list[0].id : null;
+}
+
+async function findExistingContactId(apiBaseUrl, accountId, token, { email, phone, sourceId }) {
+  for (const q of [phone, sourceId, email].filter(Boolean)) {
+    const id = await searchContactBy(apiBaseUrl, accountId, token, q);
+    if (id) return id;
+  }
+  return null;
+}
+
+/**
+ * Find an existing contact (by phone first, then email) or create one.
+ * Handles Chatwoot's 422 "phone/email already taken" by reusing the existing
+ * contact, and falls back to creating without the email on email collisions —
+ * so an already-existing contact is always messaged, never skipped.
+ */
+export async function resolveContactId({ apiBaseUrl, accountId, token, inboxId, name, phone, email, sourceId }) {
+  let id = await findExistingContactId(apiBaseUrl, accountId, token, { phone, sourceId });
+  if (id) return id;
+
+  const create = async (withEmail) => {
+    const body = { inbox_id: inboxId, name, phone_number: phone };
+    if (withEmail && email) body.email = email;
+    const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/contacts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', api_access_token: token },
+      body: JSON.stringify(body)
+    });
+    const b = await r.json().catch(() => ({}));
+    return { r, b };
+  };
+
+  let { r, b } = await create(true);
+  if (r.ok) return b.payload?.contact?.id || b.id || b.contact?.id;
+
+  if (r.status === 422) {
+    // Already exists (phone or email) — find and reuse it
+    id = await findExistingContactId(apiBaseUrl, accountId, token, { phone, sourceId, email });
+    if (id) return id;
+    // Email belongs to a different contact — create with phone only
+    ({ r, b } = await create(false));
+    if (r.ok) return b.payload?.contact?.id || b.id || b.contact?.id;
+    id = await findExistingContactId(apiBaseUrl, accountId, token, { phone, sourceId });
+    if (id) return id;
+  }
+
+  throw new Error(`Could not find or create contact (HTTP ${r.status}${b?.message ? ': ' + b.message : ''})`);
 }
 
 // ─── Single Node Executor ─────────────────────────────────────────────────
@@ -283,35 +388,12 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step) {
 
   try {
     if (!contactId) {
-      // Search for existing contact
-      const searchUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(context.phone || context.sourceId)}`;
-      step.request = { url: searchUrl, method: 'GET' };
-      const searchRes = await fetch(searchUrl, { headers: { api_access_token: token } });
-      const searchBody = await searchRes.json();
-      const contacts = Array.isArray(searchBody) ? searchBody : (searchBody.payload || []);
-      if (contacts.length > 0) {
-        contactId = contacts[0].id;
-      } else {
-        // Create contact
-        const createUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/contacts`;
-        const createBody = { inbox_id: inboxId, name: context.fullName, phone_number: context.phone, email: context.email || undefined };
-        const createRes = await fetch(createUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', api_access_token: token }, body: JSON.stringify(createBody) });
-        const createResBody = await createRes.json();
-
-        if (createRes.status === 422) {
-          // Fallback: search again
-          const fb = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(context.sourceId)}`, { headers: { api_access_token: token } });
-          if (fb.ok) {
-            const fbBody = await fb.json();
-            const fbContacts = Array.isArray(fbBody) ? fbBody : (fbBody.payload || []);
-            if (fbContacts.length > 0) contactId = fbContacts[0].id;
-          }
-        } else if (createRes.ok) {
-          contactId = createResBody.payload?.contact?.id || createResBody.id || createResBody.contact?.id;
-        }
-
-        if (!contactId) throw new Error('Could not find or create contact');
-      }
+      step.request = { method: 'resolveContactId', name: context.fullName, phone: context.phone, email: context.email };
+      contactId = await resolveContactId({
+        apiBaseUrl, accountId, token, inboxId,
+        name: context.fullName, phone: context.phone, email: context.email, sourceId: context.sourceId
+      });
+      if (!contactId) throw new Error('Could not find or create contact');
       context._contactId = contactId;
     }
 
@@ -341,8 +423,8 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step) {
       processedParamsBody[String(i + 1)] = val;
     });
 
-    let content = `Template "${templateName}" sent:\n`;
-    mapping.forEach((key, i) => { content += `• {{${i + 1}}} (${key}): ${processedParamsBody[String(i + 1)]}\n`; });
+    const templateBody = await getTemplateBody(settings, templateName);
+    const content = renderTemplateBody(templateBody, processedParamsBody) || `Template: ${templateName}`;
 
     const msgUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
     const msgBody = {
@@ -478,24 +560,13 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
         contactId = contacts[0].id;
         step.response = { note: `Reusing contact ID: ${contactId}`, body: contacts[0] };
       } else {
-        const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/contacts`;
-        const body = { inbox_id: inboxId, name: context.fullName, phone_number: context.phone, email: context.email || undefined };
-        step.request = { url, method: 'POST', body };
-        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', api_access_token: token }, body: JSON.stringify(body) });
-        const resBody = await res.json();
-        step.response = { status: res.status, body: resBody };
-
-        if (res.status === 422) {
-          const fb = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(context.sourceId)}`, { headers: { api_access_token: token } });
-          if (fb.ok) {
-            const fbBody = await fb.json();
-            const fbContacts = Array.isArray(fbBody) ? fbBody : (fbBody.payload || []);
-            if (fbContacts.length > 0) { contactId = fbContacts[0].id; return contactId; }
-          }
-        }
-        if (!res.ok) throw new Error(`Create Contact failed: ${resBody.message || res.statusText} (${res.status})`);
-        contactId = resBody.payload?.contact?.id || resBody.id || resBody.contact?.id;
+        step.request = { method: 'resolveContactId', name: context.fullName, phone: context.phone, email: context.email };
+        contactId = await resolveContactId({
+          apiBaseUrl, accountId, token, inboxId,
+          name: context.fullName, phone: context.phone, email: context.email, sourceId: context.sourceId
+        });
         if (!contactId) throw new Error('No contact ID returned');
+        step.response = { note: `Resolved contact ID: ${contactId}` };
       }
       return contactId;
     });
@@ -521,8 +592,8 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
         if (!val && key === 'abandonedCheckoutUrl') val = 'https://stomatalfarms.com/checkout';
         processedParamsBody[String(i + 1)] = val;
       });
-      let content = `Template "${templateName}" sent:\n`;
-      mapping.forEach((key, i) => { content += `• {{${i + 1}}} (${key}): ${processedParamsBody[String(i + 1)]}\n`; });
+      const templateBody = await getTemplateBody(settings, templateName);
+      const content = renderTemplateBody(templateBody, processedParamsBody) || `Template: ${templateName}`;
       const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
       const body = { message_type: 'outgoing', content, template_params: { name: templateName, category: 'UTILITY', language: 'en', processed_params: { body: processedParamsBody } } };
       step.request = { url, method: 'POST', body };
