@@ -20,6 +20,7 @@ interface Settings {
   SHOPIFY_SCOPES: string;
   SHOPIFY_APP_URL: string;
   WEBHOOK_MAX_RETRIES: string;
+  ABANDONED_CARTS_ENABLED: string;
   [key: string]: string;
 }
 
@@ -37,6 +38,7 @@ const EMPTY: Settings = {
   SHOPIFY_STORE_URL: '', SHOPIFY_ADMIN_TOKEN: '',
   SHOPIFY_API_KEY: '', SHOPIFY_API_SECRET: '', SHOPIFY_SCOPES: 'read_orders,read_checkouts,read_fulfillments', SHOPIFY_APP_URL: '',
   WEBHOOK_MAX_RETRIES: '3',
+  ABANDONED_CARTS_ENABLED: '1',
 };
 
 interface TemplateInfo { name: string; language: string; category: string; paramCount: number; body: string; }
@@ -117,9 +119,30 @@ export const Settings: React.FC = () => {
   const [showShopifySecret, setShowShopifySecret] = useState(false);
   const [shopStatus, setShopStatus] = useState<{ connected: boolean; shop: string; scopes: string; hasCredentials: boolean } | null>(null);
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
+  const [cwWebhookStatus, setCwWebhookStatus] = useState<{ registered: boolean; webhookUrl: string } | null>(null);
+  const [cwWebhookBusy, setCwWebhookBusy] = useState(false);
 
   const loadStatus = () => {
     fetch(`${API}/shopify/status`).then(r => r.json()).then(setShopStatus).catch(() => {});
+  };
+
+  const loadChatwootWebhookStatus = () => {
+    fetch(`${API}/chatwoot/webhook/status`).then(r => r.json()).then(setCwWebhookStatus).catch(() => {});
+  };
+
+  const registerChatwootWebhook = async () => {
+    setCwWebhookBusy(true);
+    try {
+      const res = await fetch(`${API}/chatwoot/webhook/register`, { method: 'POST' });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || 'Registration failed');
+      setMsg('Chatwoot delivery webhook registered ✓');
+      loadChatwootWebhookStatus();
+    } catch (err: any) {
+      setMsg(`Error: ${err.message}`);
+    }
+    setCwWebhookBusy(false);
+    setTimeout(() => setMsg(''), 4000);
   };
 
   useEffect(() => {
@@ -128,6 +151,7 @@ export const Settings: React.FC = () => {
       .then(d => { setSettings({ ...EMPTY, ...d }); setLoading(false); })
       .catch(() => setLoading(false));
     loadStatus();
+    loadChatwootWebhookStatus();
     fetch(`${API}/whatsapp/templates`).then(r => r.json()).then(d => setTemplates(Array.isArray(d) ? d : [])).catch(() => {});
     if (new URLSearchParams(window.location.search).get('shopify') === 'connected') {
       setMsg('Shopify connected ✓');
@@ -220,6 +244,46 @@ export const Settings: React.FC = () => {
             <label className="form-label">Auto-retry failed webhooks</label>
             <input className="input" type="number" min={0} value={settings.WEBHOOK_MAX_RETRIES} onChange={e => set('WEBHOOK_MAX_RETRIES', e.target.value)} placeholder="3" />
             <div className="form-hint">Max automatic retries on failure (backoff 1m → 5m → 15m). Set 0 to disable.</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Track Abandoned Carts</label>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                className={`btn btn-sm ${settings.ABANDONED_CARTS_ENABLED === '1' ? 'btn-success' : 'btn-secondary'}`}
+                onClick={() => set('ABANDONED_CARTS_ENABLED', '1')}
+              >
+                ✓ ON
+              </button>
+              <button
+                className={`btn btn-sm ${settings.ABANDONED_CARTS_ENABLED !== '1' ? 'btn-danger' : 'btn-secondary'}`}
+                onClick={() => set('ABANDONED_CARTS_ENABLED', '0')}
+              >
+                ✕ OFF
+              </button>
+            </div>
+            <div className="form-hint">When enabled, abandoned checkouts are automatically captured and tracked</div>
+          </div>
+        </div>
+
+        <div className="divider" />
+
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="form-label" style={{ marginBottom: 4 }}>Delivery Reports</div>
+            <div className="form-hint">
+              Registers a webhook in Chatwoot so sent/delivered/read/failed status updates flow back into your Logs.
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {cwWebhookStatus && (
+              <span className={`badge ${cwWebhookStatus.registered ? 'success' : 'pending'}`}>
+                <span className="badge-dot" />{cwWebhookStatus.registered ? 'Registered' : 'Not registered'}
+              </span>
+            )}
+            <button className="btn btn-secondary btn-sm" onClick={registerChatwootWebhook} disabled={cwWebhookBusy}>
+              {cwWebhookBusy ? <span className="spinner" style={{ width: 12, height: 12 }} /> : null}
+              {cwWebhookStatus?.registered ? 'Re-register' : 'Register Webhook'}
+            </button>
           </div>
         </div>
       </div>

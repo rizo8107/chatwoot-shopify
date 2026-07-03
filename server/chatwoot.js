@@ -1,4 +1,10 @@
-import { getAllSettings } from './db.js';
+import { getAllSettings, claimNotification, markNotificationSent, markNotificationFailed } from './db.js';
+
+/** Build the idempotency key for a WhatsApp send: one send per (scope, topic, order/checkout). */
+function buildDedupeKey(scope, topic, context) {
+  const identifier = context.orderNumber || context.checkoutId || context.trackingNumber || context.sourceId || 'unknown';
+  return `${scope}:${topic || 'unknown'}:${identifier}`;
+}
 
 // ─── Extractors ────────────────────────────────────────────────────────────
 
@@ -103,7 +109,9 @@ export function normalizePhone(phone, fallbackSourceId) {
   let cleanPhone = String(phone || '').replace(/[\s\-().+]/g, '');
   if (cleanPhone.startsWith('0')) cleanPhone = '91' + cleanPhone.slice(1);
   else if (cleanPhone.length === 10) cleanPhone = '91' + cleanPhone;
-  const sourceId = cleanPhone || fallbackSourceId;
+  // For WhatsApp inbox, sourceId must be numeric (1-15 digits) or business account format.
+  // If no phone available, generate numeric ID from timestamp + random
+  const sourceId = cleanPhone || (fallbackSourceId ? String(Date.now() % 999999999999999).slice(0, 15) : '');
   const formattedPhone = cleanPhone ? `+${cleanPhone}` : '';
   return { cleanPhone, formattedPhone, sourceId };
 }
@@ -215,7 +223,7 @@ export async function resolveContactId({ apiBaseUrl, accountId, token, inboxId, 
 
 // ─── Single Node Executor ─────────────────────────────────────────────────
 
-export async function executeFlowNode(node, context, settings, steps) {
+export async function executeFlowNode(node, context, settings, steps, flow = null) {
   const step = {
     name: node.data?.label || node.type,
     nodeId: node.id,
@@ -275,9 +283,13 @@ export async function executeFlowNode(node, context, settings, steps) {
       }
 
       case 'whatsapp': {
-        const result = await sendWhatsAppTemplate(node.data, context, settings, step);
+        const dedupeKey = flow
+          ? buildDedupeKey(`flow:${flow.id}:${node.id}`, flow.trigger_event, context)
+          : null;
+        const result = await sendWhatsAppTemplate(node.data, context, settings, step, dedupeKey);
         finish(result.ok ? 'success' : 'failed', result.response, result.ok ? null : { message: result.error });
         if (!result.ok) throw new Error(result.error);
+        if (result.chatwootMessageId) context._lastChatwootMessageId = result.chatwootMessageId;
         return { type: 'action' };
       }
 
@@ -330,7 +342,7 @@ export async function executeFlow(flow, context, startNodeId = null) {
 
     let result;
     try {
-      result = await executeFlowNode(node, context, settings, steps);
+      result = await executeFlowNode(node, context, settings, steps, flow);
     } catch (err) {
       return {
         status: 'failed',
@@ -349,7 +361,8 @@ export async function executeFlow(flow, context, startNodeId = null) {
         steps,
         context,
         nextNodeId: nextEdge?.target || null,
-        delayMs: result.delayMs
+        delayMs: result.delayMs,
+        chatwootMessageId: context._lastChatwootMessageId || null
       };
     }
 
@@ -369,12 +382,12 @@ export async function executeFlow(flow, context, startNodeId = null) {
     if (result.updatedContext) Object.assign(context, result.updatedContext);
   }
 
-  return { status: 'success', steps, context };
+  return { status: 'success', steps, context, chatwootMessageId: context._lastChatwootMessageId || null };
 }
 
 // ─── WhatsApp Send Helper ─────────────────────────────────────────────────
 
-async function sendWhatsAppTemplate(nodeData, context, settings, step) {
+async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey) {
   const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
   const token = settings.CHATWOOT_API_TOKEN;
   const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
@@ -385,6 +398,11 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step) {
   // Ensure contact + conversation exist
   let contactId = context._contactId;
   let conversationId = context._conversationId;
+
+  if (dedupeKey && !(await claimNotification(dedupeKey))) {
+    step.response = { note: 'Skipped — already sent for this order' };
+    return { ok: true, skipped: true, response: step.response };
+  }
 
   try {
     if (!contactId) {
@@ -444,8 +462,10 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step) {
     step.response = { status: msgRes.status, body: msgResBody };
 
     if (!msgRes.ok) throw new Error(`Send WhatsApp failed: ${msgRes.status}`);
-    return { ok: true, response: { status: msgRes.status, body: msgResBody } };
+    if (dedupeKey) await markNotificationSent(dedupeKey, msgResBody.id);
+    return { ok: true, response: { status: msgRes.status, body: msgResBody }, chatwootMessageId: msgResBody.id };
   } catch (err) {
+    if (dedupeKey) await markNotificationFailed(dedupeKey);
     return { ok: false, error: err.message, response: step.response };
   }
 }
@@ -532,6 +552,8 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
     }
   };
 
+  const dedupeKey = buildDedupeKey('legacy', detectedTopic, context);
+
   try {
     let orderDetails = null;
     let contactId = null;
@@ -542,6 +564,16 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
       step.response = { body: context };
       return context;
     });
+
+    const claimed = await runStep('Idempotency Check', async (step) => {
+      const ok = await claimNotification(dedupeKey);
+      step.response = { dedupeKey, claimed: ok, note: ok ? 'Proceeding — first attempt for this order' : 'Skipped — a message was already sent for this order' };
+      return ok;
+    });
+
+    if (!claimed) {
+      return { status: 'success', orderDetails: context, steps, skipped: true };
+    }
 
     const searchResult = await runStep('Search Contact', async (step) => {
       if (!context.phone) { step.response = { note: 'No phone, skipping' }; return []; }
@@ -583,7 +615,7 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
       return resBody.id;
     });
 
-    await runStep('Send WhatsApp Template', async (step) => {
+    const sendResult = await runStep('Send WhatsApp Template', async (step) => {
       const mapping = (templateMapping || '').split(',').map(s => s.trim()).filter(Boolean);
       const processedParamsBody = {};
       mapping.forEach((key, i) => {
@@ -604,8 +636,10 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
       return resBody;
     });
 
-    return { status: 'success', orderDetails: context, steps };
+    await markNotificationSent(dedupeKey, sendResult.id);
+    return { status: 'success', orderDetails: context, steps, chatwootMessageId: sendResult.id };
   } catch (error) {
+    await markNotificationFailed(dedupeKey);
     return { status: 'failed', orderDetails: context, steps, errorMessage: error.message };
   }
 }

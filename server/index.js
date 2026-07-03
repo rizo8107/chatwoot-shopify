@@ -13,6 +13,11 @@ import {
 import { fetchChatwootContacts, importContacts } from './contacts.js';
 
 import {
+  authConfigured, signInWithPassword, sendResetPasswordEmail, resetPasswordWithCode,
+  createToken, currentUser, sessionCookie
+} from './auth.js';
+
+import {
   initDb,
   logTransaction,
   getTransactions,
@@ -35,7 +40,19 @@ import {
   pauseCampaign,
   retryFailedRecipients,
   retryRecipient,
-  scheduleWebhookRetry
+  scheduleWebhookRetry,
+  saveAbandonedCart,
+  getAbandonedCarts,
+  getAbandonedCartById,
+  updateAbandonedCartStatus,
+  getAbandonedCartStats,
+  saveAbandonedCartFlow,
+  getAbandonedCartFlows,
+  getAbandonedCartFlowById,
+  deleteAbandonedCartFlow,
+  toggleAbandonedCartFlow,
+  setTransactionChatwootMessageId,
+  updateDeliveryStatusByMessageId
 } from './db.js';
 
 import {
@@ -59,6 +76,68 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 3000;
+
+// ─── Auth gate ──────────────────────────────────────────────────────────────
+// Protects all /api routes except: auth endpoints, the Shopify webhook, and the
+// Shopify OAuth callback (machine-called, secured by HMAC). Credentials are
+// verified against InsForge Auth (server/auth.js); this app issues its own
+// short-lived session cookie afterward so per-request checks stay local.
+const PUBLIC_API = new Set([
+  '/api/auth/login', '/api/auth/logout', '/api/auth/me',
+  '/api/auth/forgot-password', '/api/auth/reset-password',
+  '/api/webhook/shopify', '/api/shopify/auth/callback', '/api/webhook/chatwoot'
+]);
+
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api')) return next();     // SPA + static assets
+  if (!authConfigured()) return next();                // auth disabled
+  if (PUBLIC_API.has(req.path)) return next();         // allowlisted
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  req.user = user;
+  next();
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+    const result = await signInWithPassword(email, password);
+    if (!result.ok) return res.status(result.status === 403 ? 403 : 401).json({ error: result.message });
+    res.setHeader('Set-Cookie', sessionCookie(createToken(email)));
+    res.json({ success: true, email });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.setHeader('Set-Cookie', sessionCookie('', true));
+  res.json({ success: true });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const user = currentUser(req);
+  res.json({ authRequired: authConfigured(), authenticated: !!user, email: user?.email || null });
+});
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+    await sendResetPasswordEmail(email);
+    // Always report success — don't reveal whether the email exists.
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { email, code, newPassword } = req.body || {};
+    if (!email || !code || !newPassword) return res.status(400).json({ error: 'Email, code, and new password are required' });
+    const result = await resetPasswordWithCode(email, code, newPassword);
+    if (!result.ok) return res.status(400).json({ error: result.message });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 function genId(prefix = 'tx') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -133,7 +212,8 @@ app.post('/api/transactions/:id/retry', async (req, res) => {
         order_number: tx.order_number, customer_name: tx.customer_name, phone_number: tx.phone_number,
         status: result.status, type: tx.type || 'webhook', steps: result.steps, error_message: result.errorMessage || null
       });
-      return res.json({ success: result.status === 'success', status: result.status, error: result.errorMessage });
+      if (result.chatwootMessageId) await setTransactionChatwootMessageId(id, result.chatwootMessageId);
+      return res.json({ success: result.status === 'success', status: result.status, error: result.errorMessage, skipped: result.skipped || false });
     }
 
     return res.status(400).json({ error: 'No stored payload to retry this message. Re-send it from the Test Console.' });
@@ -150,6 +230,132 @@ app.get('/api/settings', async (req, res) => {
 app.post('/api/settings', async (req, res) => {
   try { await saveSettings(req.body); res.json({ success: true }); }
   catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Abandoned Carts ──────────────────────────────────────────────────────
+
+app.get('/api/abandoned-carts', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit || '50', 10);
+    const offset = parseInt(req.query.offset || '0', 10);
+    const status = req.query.status || 'abandoned';
+    const carts = await getAbandonedCarts(limit, offset, status);
+    res.json({ carts });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/abandoned-carts/stats', async (req, res) => {
+  try {
+    const stats = await getAbandonedCartStats();
+    res.json(stats);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/abandoned-carts/:id', async (req, res) => {
+  try {
+    const cart = await getAbandonedCartById(req.params.id);
+    if (!cart) return res.status(404).json({ error: 'Cart not found' });
+    res.json(cart);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/abandoned-carts/:id/recover', async (req, res) => {
+  try {
+    await updateAbandonedCartStatus(req.params.id, 'recovered', new Date().toISOString());
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Pull existing abandoned checkouts from Shopify's Admin API into our DB.
+// Needed because webhooks only capture NEW checkouts created after the app
+// connected — this backfills checkouts that already existed in Shopify.
+app.post('/api/abandoned-carts/sync', async (req, res) => {
+  try {
+    const s = await getAllSettings();
+    const shop = normalizeShop(s.SHOPIFY_STORE_URL);
+    if (!shop || !s.SHOPIFY_ADMIN_TOKEN) {
+      return res.status(400).json({ error: 'Shopify not connected. Connect a store in Settings first.' });
+    }
+    const limit = Math.min(parseInt(req.query.limit || '100', 10), 250);
+    const checkouts = await fetchAbandonedCheckouts({ shop, token: s.SHOPIFY_ADMIN_TOKEN, limit });
+
+    let imported = 0;
+    for (const checkout of checkouts) {
+      // Skip checkouts that were actually completed (not abandoned)
+      if (checkout.completed_at) continue;
+
+      const cartItems = (checkout.line_items || []).map(item => ({
+        id: item.id,
+        title: item.title,
+        quantity: item.quantity,
+        price: item.price
+      }));
+
+      await saveAbandonedCart({
+        id: `cart_shopify_${checkout.token || checkout.id}`,
+        checkout_token: String(checkout.token || checkout.id),
+        customer_name: checkout.billing_address?.first_name || checkout.customer?.first_name || checkout.email || 'Unknown',
+        customer_email: checkout.email || checkout.customer?.email || '',
+        customer_phone: checkout.phone || checkout.billing_address?.phone || '',
+        cart_items: cartItems,
+        cart_total_price: checkout.total_price || checkout.total_line_items_price || '0',
+        abandoned_at: checkout.created_at || new Date().toISOString(),
+        shopify_checkout_url: checkout.abandoned_checkout_url || ''
+      });
+      imported++;
+    }
+
+    res.json({ success: true, imported, total: checkouts.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Abandoned Cart Recovery Flows ────────────────────────────────────────
+
+app.get('/api/abandoned-cart-flows', async (req, res) => {
+  try {
+    const flows = await getAbandonedCartFlows();
+    res.json(flows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/abandoned-cart-flows/:id', async (req, res) => {
+  try {
+    const flow = await getAbandonedCartFlowById(req.params.id);
+    if (!flow) return res.status(404).json({ error: 'Flow not found' });
+    res.json(flow);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/abandoned-cart-flows', async (req, res) => {
+  try {
+    const { id, name, description, is_active, messages } = req.body;
+    const flowId = id || genId('acf');
+    await saveAbandonedCartFlow({ id: flowId, name, description, is_active: is_active !== false, messages: messages || [] });
+    res.json({ success: true, id: flowId });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/abandoned-cart-flows/:id', async (req, res) => {
+  try {
+    const { name, description, is_active, messages } = req.body;
+    await saveAbandonedCartFlow({ id: req.params.id, name, description, is_active: is_active !== false, messages: messages || [] });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/abandoned-cart-flows/:id', async (req, res) => {
+  try {
+    await deleteAbandonedCartFlow(req.params.id);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/abandoned-cart-flows/:id/toggle', async (req, res) => {
+  try {
+    const { is_active } = req.body;
+    await toggleAbandonedCartFlow(req.params.id, is_active);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ─── Flows CRUD ───────────────────────────────────────────────────────────
@@ -203,6 +409,62 @@ app.get('/api/webhook/info', (req, res) => {
       { event: 'fulfillments/create', label: 'Fulfillment Created (Order Shipped)', description: 'Fires when an order is fulfilled/shipped' }
     ]
   });
+});
+
+// ─── Chatwoot Webhook Registration (Delivery Reports) ─────────────────────
+
+// Chatwoot's webhooks list response is nested as { payload: { webhooks: [...] } }.
+function extractWebhookList(resBody) {
+  if (Array.isArray(resBody)) return resBody;
+  if (Array.isArray(resBody?.payload)) return resBody.payload;
+  if (Array.isArray(resBody?.payload?.webhooks)) return resBody.payload.webhooks;
+  if (Array.isArray(resBody?.webhooks)) return resBody.webhooks;
+  return [];
+}
+
+// Register an account-level webhook in Chatwoot so it POSTs message status
+// changes (sent/delivered/read/failed) back to our /api/webhook/chatwoot receiver.
+app.post('/api/chatwoot/webhook/register', async (req, res) => {
+  try {
+    const settings = await getAllSettings();
+    const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
+    const token = settings.CHATWOOT_API_TOKEN;
+    const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
+    if (!apiBaseUrl || !token) return res.status(400).json({ error: 'Chatwoot API not configured in Settings' });
+
+    const webhookUrl = `${appBaseUrl(req, settings)}/api/webhook/chatwoot`;
+    const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/webhooks`;
+    const body = { webhook: { url: webhookUrl, subscriptions: ['message_created', 'message_updated', 'conversation_status_changed'] } };
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', api_access_token: token }, body: JSON.stringify(body) });
+    const resBody = await r.json();
+
+    // Chatwoot enforces a unique URL per webhook — treat "already registered" as success.
+    if (!r.ok) {
+      const alreadyExists = r.status === 422 && JSON.stringify(resBody).includes('has already been taken');
+      if (!alreadyExists) return res.status(r.status).json({ error: `Chatwoot error ${r.status}`, detail: resBody });
+    }
+    res.json({ success: true, webhookUrl, webhook: resBody });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Check whether our delivery-report webhook is already registered in Chatwoot.
+app.get('/api/chatwoot/webhook/status', async (req, res) => {
+  try {
+    const settings = await getAllSettings();
+    const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
+    const token = settings.CHATWOOT_API_TOKEN;
+    const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
+    const webhookUrl = `${appBaseUrl(req, settings)}/api/webhook/chatwoot`;
+    if (!apiBaseUrl || !token) return res.json({ registered: false, webhookUrl });
+
+    const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/webhooks`;
+    const r = await fetch(url, { headers: { api_access_token: token } });
+    const resBody = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: `Chatwoot error ${r.status}`, detail: resBody });
+    const list = extractWebhookList(resBody);
+    const found = list.find(w => w.url === webhookUrl);
+    res.json({ registered: !!found, webhookUrl });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ─── Shopify Proxy ────────────────────────────────────────────────────────
@@ -405,6 +667,38 @@ app.post('/api/webhook/shopify', async (req, res) => {
   // Respond immediately to Shopify
   res.status(202).json({ success: true, id: transactionId, message: 'Processing in background' });
 
+  // Track abandoned carts (if enabled)
+  if (topic === 'checkouts/create' && rawBody) {
+    try {
+      const settings = await getAllSettings();
+      const trackingEnabled = settings.ABANDONED_CARTS_ENABLED !== '0';
+      if (trackingEnabled) {
+        const cartId = genId('cart');
+        const cartToken = rawBody.token || rawBody.id;
+        const cartItems = (rawBody.line_items || []).map(item => ({
+          id: item.id,
+          title: item.title,
+          quantity: item.quantity,
+          price: item.price
+        }));
+        await saveAbandonedCart({
+          id: cartId,
+          checkout_token: cartToken,
+          customer_name: rawBody.billing_address?.first_name || rawBody.customer?.first_name || details.fullName || 'Unknown',
+          customer_email: rawBody.email || rawBody.customer?.email || '',
+          customer_phone: rawBody.phone || details.phone || '',
+          cart_items: cartItems,
+          cart_total_price: rawBody.total_price || rawBody.total_line_items_price || '0',
+          abandoned_at: new Date().toISOString(),
+          shopify_checkout_url: rawBody.abandoned_checkout_url || rawBody.checkout_url || ''
+        });
+        console.log(`[Webhook] Tracked abandoned cart: ${cartId}`);
+      }
+    } catch (err) {
+      console.error('[Webhook] Failed to track abandoned cart:', err.message);
+    }
+  }
+
   // Find matching active flows
   const matchingFlows = await getFlowsByTrigger(topic).catch(() => []);
 
@@ -437,6 +731,7 @@ app.post('/api/webhook/shopify', async (req, res) => {
               order_number: details.orderNumber, customer_name: details.fullName, phone_number: details.phone,
               status: result.status, type: 'flow', steps: result.steps, error_message: result.errorMessage || null
             });
+            if (result.chatwootMessageId) await setTransactionChatwootMessageId(flowTxId, result.chatwootMessageId);
             console.log(`[Webhook] Flow ${flow.id}: ${result.status}`);
             if (result.status === 'failed') await queueRetry(flowTxId, rawBody, topic, flow.id);
           }
@@ -466,6 +761,7 @@ app.post('/api/webhook/shopify', async (req, res) => {
           order_number: details.orderNumber, customer_name: details.fullName, phone_number: details.phone,
           status: result.status, type: 'webhook', steps: result.steps, error_message: result.errorMessage || null
         });
+        if (result.chatwootMessageId) await setTransactionChatwootMessageId(transactionId, result.chatwootMessageId);
         if (result.status === 'failed') await queueRetry(transactionId, rawBody, topic, null);
       })
       .catch(async (err) => {
@@ -476,6 +772,27 @@ app.post('/api/webhook/shopify', async (req, res) => {
         });
         await queueRetry(transactionId, rawBody, topic, null);
       });
+  }
+});
+
+// ─── Chatwoot Webhook (Delivery Reports) ──────────────────────────────────
+// Chatwoot calls this when a message's WhatsApp delivery status changes
+// (sent → delivered → read, or failed). Registered via /api/chatwoot/webhook/register.
+app.post('/api/webhook/chatwoot', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const messageId = body.id;
+    // Chatwoot sends the WhatsApp-reported status on message_updated events;
+    // fall back to conversation_status_changed payloads being no-ops here.
+    const status = body.status;
+    if (messageId && ['sent', 'delivered', 'read', 'failed'].includes(status)) {
+      await updateDeliveryStatusByMessageId(messageId, status);
+    }
+    res.status(200).json({ success: true });
+  } catch (err) {
+    // Always 200 — a non-2xx response makes Chatwoot retry-storm the webhook.
+    console.error('[Chatwoot Webhook] error:', err.message);
+    res.status(200).json({ success: false, error: err.message });
   }
 });
 

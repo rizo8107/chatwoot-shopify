@@ -59,6 +59,27 @@ export async function initDb() {
   // Add flow_id and type columns if upgrading from old schema
   try { await run(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS flow_id TEXT`); } catch (_) {}
   try { await run(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'webhook'`); } catch (_) {}
+  // Chatwoot delivery-report tracking (populated by the /api/webhook/chatwoot receiver)
+  try { await run(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS chatwoot_message_id TEXT`); } catch (_) {}
+  try { await run(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS delivery_status TEXT`); } catch (_) {}
+  try { await run(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS delivered_at TEXT`); } catch (_) {}
+  try { await run(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS read_at TEXT`); } catch (_) {}
+  await run(`CREATE INDEX IF NOT EXISTS idx_transactions_chatwoot_message ON transactions (chatwoot_message_id)`);
+
+  // Idempotency guard — one row per (sender scope + topic + order/checkout id).
+  // A WhatsApp send only proceeds if it can claim this key, so retries, duplicate
+  // Shopify webhook deliveries, and repeated manual "Retry" clicks can never
+  // re-send a message that already went out successfully for the same order.
+  await run(`
+    CREATE TABLE IF NOT EXISTS sent_notifications (
+      id TEXT PRIMARY KEY,
+      dedupe_key TEXT UNIQUE NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      chatwoot_message_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
 
   await run(`
     CREATE TABLE IF NOT EXISTS settings (
@@ -148,6 +169,50 @@ export async function initDb() {
 
   await run(`CREATE INDEX IF NOT EXISTS idx_retries_due ON webhook_retries (status, run_at)`);
 
+  await run(`
+    CREATE TABLE IF NOT EXISTS abandoned_carts (
+      id TEXT PRIMARY KEY,
+      checkout_token TEXT UNIQUE NOT NULL,
+      customer_name TEXT,
+      customer_email TEXT,
+      customer_phone TEXT,
+      cart_items TEXT NOT NULL DEFAULT '[]',
+      cart_total_price TEXT,
+      abandoned_at TEXT NOT NULL,
+      recovered_at TEXT,
+      status TEXT NOT NULL DEFAULT 'abandoned',
+      shopify_checkout_url TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_abandoned_carts_status ON abandoned_carts (status, abandoned_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_abandoned_carts_token ON abandoned_carts (checkout_token)`);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS abandoned_cart_flows (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      messages TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS abandoned_cart_messages (
+      id TEXT PRIMARY KEY,
+      flow_id TEXT NOT NULL,
+      sequence_order INTEGER NOT NULL,
+      template_name TEXT NOT NULL,
+      delay_minutes INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    )
+  `);
+
   console.log('[DB] Initialized (InsForge Postgres)');
 }
 
@@ -168,12 +233,12 @@ export async function logTransaction({ id, flow_id, order_number, customer_name,
 export async function getTransactions(limit = 100, offset = 0, status = null) {
   if (status && status !== 'all') {
     return all(
-      `SELECT id, flow_id, order_number, customer_name, phone_number, status, type, created_at, error_message FROM transactions WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      `SELECT id, flow_id, order_number, customer_name, phone_number, status, type, created_at, error_message, delivery_status FROM transactions WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       [status, limit, offset]
     );
   }
   return all(
-    `SELECT id, flow_id, order_number, customer_name, phone_number, status, type, created_at, error_message FROM transactions ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    `SELECT id, flow_id, order_number, customer_name, phone_number, status, type, created_at, error_message, delivery_status FROM transactions ORDER BY created_at DESC LIMIT ? OFFSET ?`,
     [limit, offset]
   );
 }
@@ -182,6 +247,57 @@ export async function getTransactionById(id) {
   const row = await get(`SELECT * FROM transactions WHERE id = ?`, [id]);
   if (row && row.steps) row.steps = JSON.parse(row.steps);
   return row;
+}
+
+export async function setTransactionChatwootMessageId(id, chatwootMessageId) {
+  if (!chatwootMessageId) return;
+  await run(`UPDATE transactions SET chatwoot_message_id = ? WHERE id = ?`, [String(chatwootMessageId), id]);
+}
+
+/** Update delivery status (sent/delivered/read/failed) for whichever transaction sent this Chatwoot message. */
+export async function updateDeliveryStatusByMessageId(chatwootMessageId, status) {
+  const sets = ['delivery_status = ?'];
+  const params = [status];
+  if (status === 'delivered') { sets.push('delivered_at = ?'); params.push(new Date().toISOString()); }
+  if (status === 'read') { sets.push('read_at = ?'); params.push(new Date().toISOString()); }
+  params.push(String(chatwootMessageId));
+  const res = await run(`UPDATE transactions SET ${sets.join(', ')} WHERE chatwoot_message_id = ?`, params);
+  return res.changes > 0;
+}
+
+// ─── Notification Idempotency ──────────────────────────────────────────────
+// Prevents the same WhatsApp template from being sent twice for the same
+// (sender scope + topic + order/checkout) — covers duplicate Shopify webhook
+// deliveries, the app's own auto-retry queue, and repeated manual "Retry" clicks.
+
+/** Try to claim the right to send. Returns true if the caller should proceed,
+ *  false if this exact notification was already sent (or is currently in flight). */
+export async function claimNotification(dedupeKey) {
+  const id = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const now = new Date().toISOString();
+  const res = await run(
+    `INSERT INTO sent_notifications (id, dedupe_key, status, created_at, updated_at)
+     VALUES (?, ?, 'pending', ?, ?)
+     ON CONFLICT (dedupe_key) DO UPDATE SET status = 'pending', updated_at = EXCLUDED.updated_at
+     WHERE sent_notifications.status = 'failed'
+     RETURNING id`,
+    [id, dedupeKey, now, now]
+  );
+  return res.rows.length > 0;
+}
+
+export async function markNotificationSent(dedupeKey, chatwootMessageId) {
+  await run(
+    `UPDATE sent_notifications SET status = 'sent', chatwoot_message_id = ?, updated_at = ? WHERE dedupe_key = ?`,
+    [chatwootMessageId ? String(chatwootMessageId) : null, new Date().toISOString(), dedupeKey]
+  );
+}
+
+export async function markNotificationFailed(dedupeKey) {
+  await run(
+    `UPDATE sent_notifications SET status = 'failed', updated_at = ? WHERE dedupe_key = ?`,
+    [new Date().toISOString(), dedupeKey]
+  );
 }
 
 export async function getMetrics() {
@@ -468,4 +584,113 @@ export async function retryRecipient(recipientId) {
     [new Date().toISOString(), rec.campaign_id]
   );
   return rec.campaign_id;
+}
+
+// ─── Abandoned Carts ──────────────────────────────────────────────────────
+
+export async function saveAbandonedCart({
+  id, checkout_token, customer_name, customer_email, customer_phone,
+  cart_items, cart_total_price, abandoned_at, shopify_checkout_url
+}) {
+  // Upsert on checkout_token (the natural Shopify key) so webhook-created
+  // and sync-backfilled rows for the same checkout never collide.
+  await run(
+    `INSERT INTO abandoned_carts (id, checkout_token, customer_name, customer_email, customer_phone, cart_items, cart_total_price, abandoned_at, shopify_checkout_url, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (checkout_token) DO UPDATE SET
+       customer_name = EXCLUDED.customer_name, customer_email = EXCLUDED.customer_email, customer_phone = EXCLUDED.customer_phone,
+       cart_items = EXCLUDED.cart_items, cart_total_price = EXCLUDED.cart_total_price, updated_at = EXCLUDED.updated_at`,
+    [id, checkout_token, customer_name, customer_email, customer_phone, JSON.stringify(cart_items || []), cart_total_price, abandoned_at, shopify_checkout_url, new Date().toISOString(), new Date().toISOString()]
+  );
+}
+
+export async function getAbandonedCarts(limit = 100, offset = 0, status = 'abandoned') {
+  const rows = await all(
+    `SELECT id, checkout_token, customer_name, customer_email, customer_phone, cart_items, cart_total_price, abandoned_at, recovered_at, status, shopify_checkout_url, created_at, updated_at
+     FROM abandoned_carts
+     WHERE status = ?
+     ORDER BY abandoned_at DESC
+     LIMIT ? OFFSET ?`,
+    [status, limit, offset]
+  );
+  return rows.map(r => ({
+    ...r,
+    cart_items: r.cart_items ? JSON.parse(r.cart_items) : []
+  }));
+}
+
+export async function getAbandonedCartById(id) {
+  const row = await get(`SELECT * FROM abandoned_carts WHERE id = ?`, [id]);
+  if (row && row.cart_items) {
+    row.cart_items = JSON.parse(row.cart_items);
+  }
+  return row;
+}
+
+export async function updateAbandonedCartStatus(id, status, recovered_at = null) {
+  await run(
+    `UPDATE abandoned_carts SET status = ?, recovered_at = COALESCE(?, recovered_at), updated_at = ? WHERE id = ?`,
+    [status, recovered_at, new Date().toISOString(), id]
+  );
+}
+
+export async function getAbandonedCartStats() {
+  const stats = await get(`
+    SELECT
+      COUNT(CASE WHEN status = 'abandoned' THEN 1 END) as active_abandoned,
+      COUNT(CASE WHEN status = 'recovered' THEN 1 END) as recovered,
+      COUNT(*) as total_tracked,
+      SUM(CASE WHEN cart_total_price IS NOT NULL THEN CAST(cart_total_price AS DECIMAL) ELSE 0 END) as total_value
+    FROM abandoned_carts
+  `);
+  return {
+    active_abandoned: Number(stats.active_abandoned) || 0,
+    recovered: Number(stats.recovered) || 0,
+    total_tracked: Number(stats.total_tracked) || 0,
+    total_value: stats.total_value ? String(stats.total_value) : '0'
+  };
+}
+
+// ─── Abandoned Cart Flows ─────────────────────────────────────────────────
+
+export async function saveAbandonedCartFlow({ id, name, description, is_active, messages }) {
+  await run(
+    `INSERT INTO abandoned_cart_flows (id, name, description, is_active, messages, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET
+       name = EXCLUDED.name, description = EXCLUDED.description, is_active = EXCLUDED.is_active,
+       messages = EXCLUDED.messages, updated_at = EXCLUDED.updated_at`,
+    [id, name, description, is_active ? 1 : 0, JSON.stringify(messages || []), new Date().toISOString(), new Date().toISOString()]
+  );
+}
+
+export async function getAbandonedCartFlows() {
+  const rows = await all(
+    `SELECT id, name, description, is_active, messages, created_at, updated_at FROM abandoned_cart_flows ORDER BY created_at DESC`
+  );
+  return rows.map(r => ({
+    ...r,
+    is_active: r.is_active === 1,
+    messages: r.messages ? JSON.parse(r.messages) : []
+  }));
+}
+
+export async function getAbandonedCartFlowById(id) {
+  const row = await get(`SELECT * FROM abandoned_cart_flows WHERE id = ?`, [id]);
+  if (row) {
+    row.is_active = row.is_active === 1;
+    row.messages = row.messages ? JSON.parse(row.messages) : [];
+  }
+  return row;
+}
+
+export async function deleteAbandonedCartFlow(id) {
+  await run(`DELETE FROM abandoned_cart_flows WHERE id = ?`, [id]);
+}
+
+export async function toggleAbandonedCartFlow(id, is_active) {
+  await run(
+    `UPDATE abandoned_cart_flows SET is_active = ?, updated_at = ? WHERE id = ?`,
+    [is_active ? 1 : 0, new Date().toISOString(), id]
+  );
 }

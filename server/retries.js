@@ -1,4 +1,4 @@
-import { getDueWebhookRetries, updateWebhookRetry, getFlowById, logTransaction } from './db.js';
+import { getDueWebhookRetries, updateWebhookRetry, getFlowById, logTransaction, setTransactionChatwootMessageId } from './db.js';
 import {
   executePipeline, executeFlow,
   extractOrderDetails, extractFulfillmentDetails, extractCheckoutDetails
@@ -60,6 +60,7 @@ async function runRetry(r) {
       order_number: details.orderNumber, customer_name: details.fullName, phone_number: details.phone,
       status, type: r.flow_id ? 'flow' : 'webhook', steps: result.steps, error_message: result.errorMessage || null
     });
+    if (result.chatwootMessageId) await setTransactionChatwootMessageId(r.transaction_id, result.chatwootMessageId);
 
     if (status === 'success' || status === 'processing') {
       await updateWebhookRetry(r.transaction_id, { status: 'done', attempts: attempt });

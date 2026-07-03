@@ -3,6 +3,7 @@ import React, { useEffect, useState } from 'react';
 interface Transaction {
   id: string; flow_id?: string; order_number: string; customer_name: string;
   phone_number: string; status: string; type: string; created_at: string; error_message?: string;
+  delivery_status?: string;
 }
 
 interface Step {
@@ -15,6 +16,13 @@ const API = '/api';
 function statusBadge(s: string) {
   const cls: Record<string, string> = { success: 'success', failed: 'failed', processing: 'processing', delayed: 'delayed', pending: 'pending', scheduled: 'delayed' };
   return <span className={`badge ${cls[s] || 'pending'}`}><span className="badge-dot" />{s}</span>;
+}
+
+function deliveryBadge(s?: string) {
+  if (!s) return <span className="text-dim text-sm">—</span>;
+  const cls: Record<string, string> = { sent: 'processing', delivered: 'success', read: 'success', failed: 'failed' };
+  const label: Record<string, string> = { sent: 'Sent', delivered: 'Delivered', read: 'Read', failed: 'Delivery failed' };
+  return <span className={`badge ${cls[s] || 'pending'}`}><span className="badge-dot" />{label[s] || s}</span>;
 }
 
 function timeAgo(iso: string) {
@@ -189,6 +197,7 @@ export const Logs: React.FC = () => {
                   <th>Phone</th>
                   <th>Type</th>
                   <th>Status</th>
+                  <th>Delivery</th>
                   <th>Error</th>
                   <th>Time</th>
                   <th />
@@ -203,6 +212,7 @@ export const Logs: React.FC = () => {
                       <td className="mono">{tx.phone_number || '—'}</td>
                       <td><span className="text-sm text-dim">{tx.type || 'webhook'}</span></td>
                       <td>{statusBadge(tx.status)}</td>
+                      <td>{deliveryBadge(tx.delivery_status)}</td>
                       <td style={{ maxWidth: 200 }}>
                         {tx.error_message && <span className="text-sm" style={{ color: 'var(--red)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.error_message}</span>}
                       </td>
@@ -220,7 +230,7 @@ export const Logs: React.FC = () => {
                     </tr>
                     {expanded === tx.id && (
                       <tr>
-                        <td colSpan={8} style={{ padding: 0, borderBottom: '1px solid var(--border)' }}>
+                        <td colSpan={9} style={{ padding: 0, borderBottom: '1px solid var(--border)' }}>
                           <TransactionDetail id={tx.id} onClose={() => setExpanded(null)} />
                         </td>
                       </tr>
