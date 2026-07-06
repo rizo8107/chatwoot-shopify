@@ -116,39 +116,72 @@ export function normalizePhone(phone, fallbackSourceId) {
   return { cleanPhone, formattedPhone, sourceId };
 }
 
-// ─── WhatsApp template body (so messages read like the real template) ────────
-
-let _templateCache = { at: 0, byName: {} };
+// ─── WhatsApp template body + button info (so messages read like the real template) ───
 
 /**
- * Fetch the inbox's approved templates and return the BODY text for a template
- * by name (e.g. "Hi {{1}} 🙏 Order ID: {{2}} ..."). Cached for 60s.
+ * Cached template info: body text and button components keyed by template name.
+ * Shape: { at: timestamp, templates: { [name]: { body: string, buttons: [{index, varCount}] } } }
+ */
+let _templateCache = { at: 0, templates: {} };
+
+/**
+ * Refresh the template cache from Chatwoot once every 60s.
+ * Stores both the BODY text and the BUTTONS (with how many {{N}} vars each has).
+ */
+async function refreshTemplateCache(settings) {
+  const now = Date.now();
+  if (now - _templateCache.at < 60_000) return; // still fresh
+  try {
+    const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
+    const token = settings.CHATWOOT_API_TOKEN;
+    const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
+    const inboxId = settings.CHATWOOT_INBOX_ID || '1';
+    if (!apiBaseUrl || !token) return;
+    const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`, { headers: { api_access_token: token } });
+    if (!r.ok) return;
+    const b = await r.json();
+    const raw = b.message_templates || b.payload?.message_templates || [];
+    const templates = {};
+    for (const t of raw) {
+      const comps = t.components || [];
+      const bodyComp = comps.find(c => (c.type || '').toUpperCase() === 'BODY');
+      const buttonComps = comps.filter(c => (c.type || '').toUpperCase() === 'BUTTONS');
+      // Flatten button sub-entries; each button may itself be an array or object
+      const buttons = [];
+      buttonComps.forEach(bc => {
+        const btns = Array.isArray(bc.buttons) ? bc.buttons : (bc.buttons ? [bc.buttons] : [bc]);
+        btns.forEach((btn, idx) => {
+          // Count how many {{N}} placeholders are in the button's URL or text
+          const urlText = btn.url || btn.text || '';
+          const varCount = (urlText.match(/\{\{\d+\}\}/g) || []).length;
+          if (varCount > 0 || btn.type === 'URL') {
+            buttons.push({ index: idx, type: btn.type || 'URL', varCount });
+          }
+        });
+      });
+      templates[t.name] = { body: bodyComp?.text || '', buttons };
+    }
+    _templateCache = { at: now, templates };
+  } catch (_) { /* keep stale cache on failure */ }
+}
+
+/**
+ * Return the BODY text for a template by name. Cached for 60s.
  */
 export async function getTemplateBody(settings, templateName) {
   if (!templateName) return null;
-  const now = Date.now();
-  if (now - _templateCache.at > 60_000) {
-    try {
-      const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
-      const token = settings.CHATWOOT_API_TOKEN;
-      const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
-      const inboxId = settings.CHATWOOT_INBOX_ID || '1';
-      if (apiBaseUrl && token) {
-        const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`, { headers: { api_access_token: token } });
-        if (r.ok) {
-          const b = await r.json();
-          const raw = b.message_templates || b.payload?.message_templates || [];
-          const byName = {};
-          for (const t of raw) {
-            const comp = (t.components || []).find(c => (c.type || '').toUpperCase() === 'BODY');
-            byName[t.name] = comp?.text || '';
-          }
-          _templateCache = { at: now, byName };
-        }
-      }
-    } catch (_) { /* keep stale cache on failure */ }
-  }
-  return _templateCache.byName[templateName] || null;
+  await refreshTemplateCache(settings);
+  return _templateCache.templates[templateName]?.body || null;
+}
+
+/**
+ * Return button info for a template (array of { index, type, varCount }).
+ * Returns [] if the template has no dynamic-URL buttons.
+ */
+export async function getTemplateButtons(settings, templateName) {
+  if (!templateName) return [];
+  await refreshTemplateCache(settings);
+  return _templateCache.templates[templateName]?.buttons || [];
 }
 
 /**
@@ -395,6 +428,14 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey
   const templateName = nodeData?.templateName || settings.WHATSAPP_TEMPLATE_NAME || '';
   const mappingStr = nodeData?.templateMapping || settings.WHATSAPP_TEMPLATE_MAPPING || '';
 
+  // ── Skip contacts with no phone — WhatsApp requires a phone number ──────
+  if (!context.phone) {
+    step.response = { note: 'Skipped — no phone number available for this contact' };
+    console.log(`[WhatsApp] Skipping contact "${context.fullName}" — no phone number`);
+    if (dedupeKey) await markNotificationFailed(dedupeKey).catch(() => {});
+    return { ok: true, skipped: true, response: step.response };
+  }
+
   // Ensure contact + conversation exist
   let contactId = context._contactId;
   let conversationId = context._conversationId;
@@ -427,7 +468,7 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey
       context._conversationId = conversationId;
     }
 
-    // Build template params
+    // Build body params from mapping (comma-separated context keys → {{1}}, {{2}}…)
     const mapping = mappingStr.split(',').map(s => s.trim()).filter(Boolean);
     const processedParamsBody = {};
     mapping.forEach((key, i) => {
@@ -441,8 +482,27 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey
       processedParamsBody[String(i + 1)] = val;
     });
 
+    // Build button params — if the template has dynamic-URL buttons, supply the URL.
+    // The checkout/recovery URL lives in context.abandonedCheckoutUrl.
+    const templateButtons = await getTemplateButtons(settings, templateName);
+    const processedParamsButton = templateButtons.length > 0
+      ? templateButtons.map((btn, _i) => ({
+          index: String(btn.index),
+          sub_type: 'url',
+          parameters: [
+            {
+              type: 'text',
+              text: context.abandonedCheckoutUrl || context.orderStatusUrl || 'https://stomatalfarms.com'
+            }
+          ]
+        }))
+      : undefined;
+
     const templateBody = await getTemplateBody(settings, templateName);
     const content = renderTemplateBody(templateBody, processedParamsBody) || `Template: ${templateName}`;
+
+    const processedParams = { body: processedParamsBody };
+    if (processedParamsButton) processedParams.button = processedParamsButton;
 
     const msgUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
     const msgBody = {
@@ -450,9 +510,9 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey
       content,
       template_params: {
         name: templateName,
-        category: 'UTILITY',
+        category: 'MARKETING',
         language: 'en',
-        processed_params: { body: processedParamsBody }
+        processed_params: processedParams
       }
     };
 
@@ -461,7 +521,7 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey
     const msgResBody = await msgRes.json();
     step.response = { status: msgRes.status, body: msgResBody };
 
-    if (!msgRes.ok) throw new Error(`Send WhatsApp failed: ${msgRes.status}`);
+    if (!msgRes.ok) throw new Error(`Send WhatsApp failed: ${msgRes.status} — ${JSON.stringify(msgResBody)}`);
     if (dedupeKey) await markNotificationSent(dedupeKey, msgResBody.id);
     return { ok: true, response: { status: msgRes.status, body: msgResBody }, chatwootMessageId: msgResBody.id };
   } catch (err) {
@@ -552,7 +612,12 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
     }
   };
 
-  const dedupeKey = buildDedupeKey('legacy', detectedTopic, context);
+  // Dedupe by which TEMPLATE gets sent, not the raw Shopify topic: orders/create
+  // and orders/paid both send the same order-confirmation template below, and
+  // Shopify fires both within seconds for prepaid orders — without this, the
+  // customer gets two copies of the identical message.
+  const templateBucket = isFulfillment ? 'fulfillment' : isCheckout ? 'checkout' : 'order';
+  const dedupeKey = buildDedupeKey('legacy', templateBucket, context);
 
   try {
     let orderDetails = null;
@@ -564,6 +629,12 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
       step.response = { body: context };
       return context;
     });
+
+    // ── Skip contacts with no phone — WhatsApp requires a phone number ──────
+    if (!context.phone) {
+      console.log(`[Pipeline] Skipping "${context.fullName}" — no phone number available`);
+      return { status: 'success', orderDetails: context, steps, skipped: true, skipReason: 'no_phone' };
+    }
 
     const claimed = await runStep('Idempotency Check', async (step) => {
       const ok = await claimNotification(dedupeKey);
@@ -624,15 +695,43 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
         if (!val && key === 'abandonedCheckoutUrl') val = 'https://stomatalfarms.com/checkout';
         processedParamsBody[String(i + 1)] = val;
       });
+
+      // Build button params — supply the checkout/order URL for dynamic-URL buttons
+      const templateButtons = await getTemplateButtons(settings, templateName);
+      const processedParamsButton = templateButtons.length > 0
+        ? templateButtons.map(btn => ({
+            index: String(btn.index),
+            sub_type: 'url',
+            parameters: [
+              {
+                type: 'text',
+                text: context.abandonedCheckoutUrl || context.orderStatusUrl || 'https://stomatalfarms.com'
+              }
+            ]
+          }))
+        : undefined;
+
+      const processedParams = { body: processedParamsBody };
+      if (processedParamsButton) processedParams.button = processedParamsButton;
+
       const templateBody = await getTemplateBody(settings, templateName);
       const content = renderTemplateBody(templateBody, processedParamsBody) || `Template: ${templateName}`;
       const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
-      const body = { message_type: 'outgoing', content, template_params: { name: templateName, category: 'UTILITY', language: 'en', processed_params: { body: processedParamsBody } } };
+      const body = {
+        message_type: 'outgoing',
+        content,
+        template_params: {
+          name: templateName,
+          category: 'MARKETING',
+          language: 'en',
+          processed_params: processedParams
+        }
+      };
       step.request = { url, method: 'POST', body };
       const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', api_access_token: token }, body: JSON.stringify(body) });
       const resBody = await res.json();
       step.response = { status: res.status, body: resBody };
-      if (!res.ok) throw new Error(`Send WhatsApp failed: ${res.status}`);
+      if (!res.ok) throw new Error(`Send WhatsApp failed: ${res.status} — ${JSON.stringify(resBody)}`);
       return resBody;
     });
 

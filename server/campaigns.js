@@ -6,7 +6,7 @@ import {
   finalizeCampaignIfDone,
   logTransaction
 } from './db.js';
-import { normalizePhone, getTemplateBody, renderTemplateBody, resolveContactId } from './chatwoot.js';
+import { normalizePhone, getTemplateBody, getTemplateButtons, renderTemplateBody, resolveContactId } from './chatwoot.js';
 
 let processing = false;
 
@@ -44,6 +44,7 @@ async function sendOne(recipient, settings) {
     const result = await sendTemplateMessage({
       phone: recipient.phone,
       name: recipient.name || recipient.phone,
+      email: recipient.email || '',
       templateName: recipient.template_name,
       language: recipient.language,
       category: recipient.category,
@@ -112,15 +113,34 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
   const templateBody = await getTemplateBody(settings, templateName);
   const content = renderTemplateBody(templateBody, processedParams) || `Template: ${templateName}`;
 
+  // Build button params — if the template has dynamic-URL buttons, supply the URL
+  // from processedParams or a sensible fallback.
+  const templateButtons = await getTemplateButtons(settings, templateName);
+  const processedParamsButton = templateButtons.length > 0
+    ? templateButtons.map(btn => ({
+        index: String(btn.index),
+        sub_type: 'url',
+        parameters: [
+          {
+            type: 'text',
+            text: processedParams?.checkoutUrl || processedParams?.url || 'https://stomatalfarms.com'
+          }
+        ]
+      }))
+    : undefined;
+
+  const finalProcessedParams = { body: processedParams || {} };
+  if (processedParamsButton) finalProcessedParams.button = processedParamsButton;
+
   const msgUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
   const msgBody = {
     message_type: 'outgoing',
     content,
     template_params: {
       name: templateName,
-      category: category || 'UTILITY',
+      category: category || 'MARKETING',
       language: language || 'en',
-      processed_params: { body: processedParams || {} }
+      processed_params: finalProcessedParams
     }
   };
   const msgRes = await fetch(msgUrl, {
