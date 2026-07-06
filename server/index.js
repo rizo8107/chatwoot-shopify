@@ -291,12 +291,17 @@ app.post('/api/abandoned-carts/sync', async (req, res) => {
         price: item.price
       }));
 
+      // Same extractor used for the live webhook — its fallback chain covers
+      // customer, billing_address, and shipping_address so phone/email/name
+      // aren't lost when Shopify only populated one of those sub-objects.
+      const details = extractCheckoutDetails(checkout);
+
       await saveAbandonedCart({
         id: `cart_shopify_${checkout.token || checkout.id}`,
         checkout_token: String(checkout.token || checkout.id),
-        customer_name: checkout.billing_address?.first_name || checkout.customer?.first_name || checkout.email || 'Unknown',
-        customer_email: checkout.email || checkout.customer?.email || '',
-        customer_phone: checkout.phone || checkout.billing_address?.phone || '',
+        customer_name: details.fullName || '',
+        customer_email: details.email || '',
+        customer_phone: details.phone || '',
         cart_items: cartItems,
         cart_total_price: checkout.total_price || checkout.total_line_items_price || '0',
         abandoned_at: checkout.created_at || new Date().toISOString(),
@@ -667,8 +672,12 @@ app.post('/api/webhook/shopify', async (req, res) => {
   // Respond immediately to Shopify
   res.status(202).json({ success: true, id: transactionId, message: 'Processing in background' });
 
-  // Track abandoned carts (if enabled)
-  if (topic === 'checkouts/create' && rawBody) {
+  // Track abandoned carts (if enabled). checkouts/create fires the instant a
+  // checkout session starts — often before the customer has typed in their
+  // name/email/phone — so also listen for checkouts/update, which fires as
+  // Shopify learns more, and let the upsert in saveAbandonedCart fill gaps
+  // without ever blanking out data already captured.
+  if ((topic === 'checkouts/create' || topic === 'checkouts/update') && rawBody) {
     try {
       const settings = await getAllSettings();
       const trackingEnabled = settings.ABANDONED_CARTS_ENABLED !== '0';
@@ -684,15 +693,15 @@ app.post('/api/webhook/shopify', async (req, res) => {
         await saveAbandonedCart({
           id: cartId,
           checkout_token: cartToken,
-          customer_name: rawBody.billing_address?.first_name || rawBody.customer?.first_name || details.fullName || 'Unknown',
-          customer_email: rawBody.email || rawBody.customer?.email || '',
-          customer_phone: rawBody.phone || details.phone || '',
+          customer_name: details.fullName || '',
+          customer_email: details.email || '',
+          customer_phone: details.phone || '',
           cart_items: cartItems,
           cart_total_price: rawBody.total_price || rawBody.total_line_items_price || '0',
           abandoned_at: new Date().toISOString(),
           shopify_checkout_url: rawBody.abandoned_checkout_url || rawBody.checkout_url || ''
         });
-        console.log(`[Webhook] Tracked abandoned cart: ${cartId}`);
+        console.log(`[Webhook] Tracked abandoned cart (${topic}): ${cartId}`);
       }
     } catch (err) {
       console.error('[Webhook] Failed to track abandoned cart:', err.message);

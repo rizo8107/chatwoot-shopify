@@ -594,12 +594,23 @@ export async function saveAbandonedCart({
 }) {
   // Upsert on checkout_token (the natural Shopify key) so webhook-created
   // and sync-backfilled rows for the same checkout never collide.
+  //
+  // Shopify's checkouts/create fires the instant a checkout session starts —
+  // often before the customer has typed in their name/email/phone. Fuller
+  // details land later via checkouts/update. Use COALESCE(NULLIF(...)) so a
+  // later, sparser event can never blank out data we already captured; it can
+  // only fill gaps or replace with newer non-empty values.
   await run(
     `INSERT INTO abandoned_carts (id, checkout_token, customer_name, customer_email, customer_phone, cart_items, cart_total_price, abandoned_at, shopify_checkout_url, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (checkout_token) DO UPDATE SET
-       customer_name = EXCLUDED.customer_name, customer_email = EXCLUDED.customer_email, customer_phone = EXCLUDED.customer_phone,
-       cart_items = EXCLUDED.cart_items, cart_total_price = EXCLUDED.cart_total_price, updated_at = EXCLUDED.updated_at`,
+       customer_name = COALESCE(NULLIF(EXCLUDED.customer_name, ''), abandoned_carts.customer_name),
+       customer_email = COALESCE(NULLIF(EXCLUDED.customer_email, ''), abandoned_carts.customer_email),
+       customer_phone = COALESCE(NULLIF(EXCLUDED.customer_phone, ''), abandoned_carts.customer_phone),
+       cart_items = CASE WHEN EXCLUDED.cart_items = '[]' THEN abandoned_carts.cart_items ELSE EXCLUDED.cart_items END,
+       cart_total_price = COALESCE(NULLIF(EXCLUDED.cart_total_price, '0'), abandoned_carts.cart_total_price),
+       shopify_checkout_url = COALESCE(NULLIF(EXCLUDED.shopify_checkout_url, ''), abandoned_carts.shopify_checkout_url),
+       updated_at = EXCLUDED.updated_at`,
     [id, checkout_token, customer_name, customer_email, customer_phone, JSON.stringify(cart_items || []), cart_total_price, abandoned_at, shopify_checkout_url, new Date().toISOString(), new Date().toISOString()]
   );
 }
