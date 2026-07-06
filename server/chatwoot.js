@@ -196,6 +196,23 @@ export function renderTemplateBody(body, processedParams) {
   });
 }
 
+/**
+ * WhatsApp rejects a template send outright — error (#131008) "Required
+ * parameter is missing" — if any {{n}} placeholder resolves to an empty
+ * string. Rather than let that reach the API (and leave a broken "Hi !"
+ * message, or Chatwoot's own preview substituting the bare placeholder
+ * number, in the conversation), abort before sending. Combined with the
+ * per-order dedupe claim being released on failure, this lets a later event
+ * with more complete data (e.g. checkouts/update once the customer types
+ * their name) retry the same send successfully instead of failing forever.
+ */
+function assertParamsComplete(processedParamsBody) {
+  const missing = Object.entries(processedParamsBody).filter(([, v]) => !v).map(([k]) => `{{${k}}}`);
+  if (missing.length > 0) {
+    throw new Error(`Missing value for template parameter(s) ${missing.join(', ')} — not sending`);
+  }
+}
+
 // ─── Contact resolution (reuse existing contacts, don't fail on 422) ─────────
 
 async function searchContactBy(apiBaseUrl, accountId, token, q) {
@@ -493,6 +510,8 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey
       });
     }
 
+    assertParamsComplete(processedParamsBody);
+
     // ── Build button params ──────────────────────────────────────────────
     const templateButtons = await getTemplateButtons(settings, templateName);
     let processedParamsButton;
@@ -722,6 +741,8 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
         if (!val && key === 'abandonedCheckoutUrl') val = 'https://stomatalfarms.com/checkout';
         processedParamsBody[String(i + 1)] = val;
       });
+
+      assertParamsComplete(processedParamsBody);
 
       // Build button params — supply the checkout/order URL for dynamic-URL buttons
       const templateButtons = await getTemplateButtons(settings, templateName);
