@@ -468,35 +468,50 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey
       context._conversationId = conversationId;
     }
 
-    // Build body params from mapping (comma-separated context keys → {{1}}, {{2}}…)
-    const mapping = mappingStr.split(',').map(s => s.trim()).filter(Boolean);
+    // ── Build body params ────────────────────────────────────────────────
+    // Priority: rich variable_mapping from UI  >  legacy comma-separated templateMapping
+    const richMapping = nodeData?.variableMapping || null; // { '{{1}}': 'firstName', '{{2}}': 'itemsSummary', 'button_0': 'abandonedCheckoutUrl' }
     const processedParamsBody = {};
-    mapping.forEach((key, i) => {
-      let val = context[key] || '';
-      if (!val) {
-        if (key === 'trackingUrl') val = 'https://stomatalfarms.com';
-        else if (key === 'trackingCompany') val = 'Manual';
-        else if (key === 'trackingNumber') val = 'Shipped';
-        else if (key === 'abandonedCheckoutUrl') val = 'https://stomatalfarms.com/checkout';
-      }
-      processedParamsBody[String(i + 1)] = val;
-    });
 
-    // Build button params — if the template has dynamic-URL buttons, supply the URL.
-    // The checkout/recovery URL lives in context.abandonedCheckoutUrl.
+    if (richMapping && Object.keys(richMapping).length > 0) {
+      // Use the UI-configured mapping
+      Object.entries(richMapping).forEach(([placeholder, contextKey]) => {
+        if (!placeholder.startsWith('button_')) {
+          const idx = placeholder.replace(/\D/g, ''); // '{{1}}' → '1'
+          let val = context[contextKey] || '';
+          if (!val) val = getContextFallback(contextKey);
+          processedParamsBody[idx] = val;
+        }
+      });
+    } else {
+      // Legacy: comma-separated list of context keys → {{1}}, {{2}}…
+      const mapping = mappingStr.split(',').map(s => s.trim()).filter(Boolean);
+      mapping.forEach((key, i) => {
+        let val = context[key] || '';
+        if (!val) val = getContextFallback(key);
+        processedParamsBody[String(i + 1)] = val;
+      });
+    }
+
+    // ── Build button params ──────────────────────────────────────────────
     const templateButtons = await getTemplateButtons(settings, templateName);
-    const processedParamsButton = templateButtons.length > 0
-      ? templateButtons.map((btn, _i) => ({
+    let processedParamsButton;
+    if (templateButtons.length > 0) {
+      processedParamsButton = templateButtons.map(btn => {
+        // Check if the rich mapping has an explicit field for this button
+        const btnKey = `button_${btn.index}`;
+        const buttonContextKey = richMapping?.[btnKey] || 'abandonedCheckoutUrl';
+        const buttonUrl = context[buttonContextKey]
+          || context.abandonedCheckoutUrl
+          || context.orderStatusUrl
+          || 'https://stomatalfarms.com';
+        return {
           index: String(btn.index),
           sub_type: 'url',
-          parameters: [
-            {
-              type: 'text',
-              text: context.abandonedCheckoutUrl || context.orderStatusUrl || 'https://stomatalfarms.com'
-            }
-          ]
-        }))
-      : undefined;
+          parameters: [{ type: 'text', text: buttonUrl }]
+        };
+      });
+    }
 
     const templateBody = await getTemplateBody(settings, templateName);
     const content = renderTemplateBody(templateBody, processedParamsBody) || `Template: ${templateName}`;
@@ -528,6 +543,18 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey
     if (dedupeKey) await markNotificationFailed(dedupeKey);
     return { ok: false, error: err.message, response: step.response };
   }
+}
+
+/** Default fallback values for common context fields when empty. */
+function getContextFallback(key) {
+  const fallbacks = {
+    trackingUrl: 'https://stomatalfarms.com',
+    trackingCompany: 'Manual',
+    trackingNumber: 'Shipped',
+    abandonedCheckoutUrl: 'https://stomatalfarms.com/checkout',
+    orderStatusUrl: 'https://stomatalfarms.com',
+  };
+  return fallbacks[key] || '';
 }
 
 // ─── Fetch Shopify Helper ─────────────────────────────────────────────────

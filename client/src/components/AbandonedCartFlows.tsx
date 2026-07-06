@@ -2,11 +2,37 @@ import React, { useState, useEffect } from 'react';
 
 const API = '/api';
 
+// ─── Available context fields the user can map to ────────────────────────────
+const CONTEXT_FIELDS: { value: string; label: string; example: string }[] = [
+  { value: 'firstName',           label: 'First Name',           example: 'Nirmal' },
+  { value: 'fullName',            label: 'Full Name',            example: 'Nirmal Raj' },
+  { value: 'itemsSummary',        label: 'Cart Items Summary',   example: 'Incense Combo x1' },
+  { value: 'totalPrice',          label: 'Cart Total Price',     example: '₹405.00' },
+  { value: 'abandonedCheckoutUrl',label: 'Checkout Recovery URL',example: 'https://pay.stomatalfarms.com/...' },
+  { value: 'checkoutDate',        label: 'Abandoned Date',       example: '06 Jul 2026' },
+  { value: 'orderName',           label: 'Order Name',           example: '#1234' },
+  { value: 'orderNumber',         label: 'Order Number',         example: '1234' },
+  { value: 'orderStatusUrl',      label: 'Order Status URL',     example: 'https://...' },
+  { value: 'totalPrice',          label: 'Order Total',          example: '₹560.00' },
+  { value: 'itemsSummary',        label: 'Order Items',          example: 'Product x2' },
+  { value: 'orderDate',           label: 'Order Date',           example: '06 Jul 2026' },
+  { value: 'shippingCity',        label: 'Shipping City',        example: 'Chennai' },
+  { value: 'trackingUrl',         label: 'Tracking URL',         example: 'https://...' },
+  { value: 'trackingNumber',      label: 'Tracking Number',      example: 'TRK123' },
+  { value: 'trackingCompany',     label: 'Courier Company',      example: 'Delhivery' },
+];
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+interface VariableMapping {
+  [placeholder: string]: string; // e.g. { '{{1}}': 'firstName', '{{2}}': 'itemsSummary', 'button_0': 'abandonedCheckoutUrl' }
+}
+
 interface Message {
   id: string;
   sequence_order: number;
   template_name: string;
   delay_minutes: number;
+  variable_mapping?: VariableMapping;
 }
 
 interface Flow {
@@ -19,14 +45,176 @@ interface Flow {
   updated_at: string;
 }
 
+interface TemplateVariable {
+  placeholder: string; // '{{1}}'
+  index: number;        // 1
+}
+
+interface TemplateButton {
+  index: number;
+  type: string;
+  text: string;
+  url: string;
+}
+
 interface Template {
   name: string;
   language: string;
   category: string;
   paramCount: number;
   body: string;
+  variables: TemplateVariable[];
+  buttons: TemplateButton[];
 }
 
+// ─── Helper: render body preview with filled values ──────────────────────────
+function renderPreview(body: string, mapping: VariableMapping): string {
+  return body.replace(/\{\{\s*(\d+)\s*\}\}/g, (_, n) => {
+    const key = mapping[`{{${n}}}`];
+    if (!key) return `{{${n}}}`;
+    const field = CONTEXT_FIELDS.find(f => f.value === key);
+    return field ? `[${field.example}]` : `{{${n}}}`;
+  });
+}
+
+// ─── Variable Mapper sub-component ───────────────────────────────────────────
+const VariableMapper: React.FC<{
+  template: Template;
+  mapping: VariableMapping;
+  onChange: (m: VariableMapping) => void;
+}> = ({ template, mapping, onChange }) => {
+  if (template.variables.length === 0 && template.buttons.length === 0) return null;
+
+  const setField = (placeholder: string, value: string) => {
+    onChange({ ...mapping, [placeholder]: value });
+  };
+
+  return (
+    <div style={{
+      marginTop: 12,
+      padding: '12px 14px',
+      background: 'rgba(var(--primary-rgb, 99,102,241), 0.07)',
+      borderRadius: 8,
+      border: '1px solid rgba(var(--primary-rgb, 99,102,241), 0.18)',
+    }}>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, color: 'var(--primary)', marginBottom: 10 }}>
+        Template Variable Mapping
+      </div>
+
+      {/* Body variables */}
+      {template.variables.length > 0 && (
+        <div style={{ marginBottom: template.buttons.length > 0 ? 10 : 0 }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6, fontWeight: 600 }}>
+            📝 Body Variables
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {template.variables.map(v => (
+              <div key={v.placeholder} style={{ display: 'grid', gridTemplateColumns: '80px 1fr', gap: 8, alignItems: 'center' }}>
+                <div style={{
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  color: 'var(--primary)',
+                  background: 'rgba(var(--primary-rgb,99,102,241),0.12)',
+                  borderRadius: 4,
+                  padding: '3px 6px',
+                  textAlign: 'center',
+                }}>
+                  {v.placeholder}
+                </div>
+                <select
+                  className="select"
+                  style={{ fontSize: 12, padding: '4px 8px', height: 32 }}
+                  value={mapping[v.placeholder] || ''}
+                  onChange={e => setField(v.placeholder, e.target.value)}
+                >
+                  <option value="">— choose a field —</option>
+                  {CONTEXT_FIELDS.map((f, i) => (
+                    <option key={`${f.value}_${i}`} value={f.value}>
+                      {f.label} · e.g. {f.example}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Button variables */}
+      {template.buttons.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6, fontWeight: 600 }}>
+            🔘 Button URL Variable
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {template.buttons.map(btn => {
+              const key = `button_${btn.index}`;
+              return (
+                <div key={key} style={{ display: 'grid', gridTemplateColumns: '80px 1fr', gap: 8, alignItems: 'center' }}>
+                  <div style={{
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: '#f59e0b',
+                    background: 'rgba(245,158,11,0.12)',
+                    borderRadius: 4,
+                    padding: '3px 6px',
+                    textAlign: 'center',
+                  }}>
+                    btn[{btn.index}]
+                  </div>
+                  <select
+                    className="select"
+                    style={{ fontSize: 12, padding: '4px 8px', height: 32 }}
+                    value={mapping[key] || 'abandonedCheckoutUrl'}
+                    onChange={e => setField(key, e.target.value)}
+                  >
+                    <option value="">— choose a field —</option>
+                    {CONTEXT_FIELDS.filter(f => f.value.toLowerCase().includes('url') || f.value.toLowerCase().includes('link')).map((f, i) => (
+                      <option key={`${f.value}_${i}`} value={f.value}>
+                        {f.label} · e.g. {f.example}
+                      </option>
+                    ))}
+                    <optgroup label="── All fields ──">
+                      {CONTEXT_FIELDS.map((f, i) => (
+                        <option key={`all_${f.value}_${i}`} value={f.value}>
+                          {f.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  </select>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Live preview */}
+      {template.variables.length > 0 && (
+        <div style={{
+          marginTop: 12,
+          padding: '8px 10px',
+          background: 'var(--bg-subtle)',
+          borderRadius: 6,
+          fontSize: 11,
+          lineHeight: 1.6,
+          color: 'var(--text-muted)',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}>
+          <span style={{ fontWeight: 600, color: 'var(--text-primary)', display: 'block', marginBottom: 4 }}>
+            Live Preview:
+          </span>
+          {renderPreview(template.body, mapping)}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 export const AbandonedCartFlows: React.FC = () => {
   const [flows, setFlows] = useState<Flow[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -72,9 +260,9 @@ export const AbandonedCartFlows: React.FC = () => {
       description: '',
       is_active: true,
       messages: [
-        { id: '1', sequence_order: 1, template_name: '', delay_minutes: 0 },
-        { id: '2', sequence_order: 2, template_name: '', delay_minutes: 60 },
-        { id: '3', sequence_order: 3, template_name: '', delay_minutes: 1440 }
+        { id: '1', sequence_order: 1, template_name: '', delay_minutes: 0, variable_mapping: {} },
+        { id: '2', sequence_order: 2, template_name: '', delay_minutes: 60, variable_mapping: {} },
+        { id: '3', sequence_order: 3, template_name: '', delay_minutes: 1440, variable_mapping: {} }
       ],
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
@@ -84,10 +272,7 @@ export const AbandonedCartFlows: React.FC = () => {
 
   const saveFlow = async () => {
     if (!editingFlow) return;
-    if (!editingFlow.name.trim()) {
-      setError('Flow name is required');
-      return;
-    }
+    if (!editingFlow.name.trim()) { setError('Flow name is required'); return; }
     if (editingFlow.messages.some(m => !m.template_name)) {
       setError('All messages must have a template selected');
       return;
@@ -148,7 +333,20 @@ export const AbandonedCartFlows: React.FC = () => {
   const updateMessage = (idx: number, field: keyof Message, value: any) => {
     if (!editingFlow) return;
     const updated = { ...editingFlow };
+    updated.messages = [...updated.messages];
     updated.messages[idx] = { ...updated.messages[idx], [field]: value };
+    // When template changes, reset the mapping
+    if (field === 'template_name') {
+      updated.messages[idx].variable_mapping = {};
+    }
+    setEditingFlow(updated);
+  };
+
+  const updateMapping = (idx: number, newMapping: VariableMapping) => {
+    if (!editingFlow) return;
+    const updated = { ...editingFlow };
+    updated.messages = [...updated.messages];
+    updated.messages[idx] = { ...updated.messages[idx], variable_mapping: newMapping };
     setEditingFlow(updated);
   };
 
@@ -159,12 +357,10 @@ export const AbandonedCartFlows: React.FC = () => {
       id: `msg_${Date.now()}`,
       sequence_order: maxOrder + 1,
       template_name: '',
-      delay_minutes: 0
+      delay_minutes: 0,
+      variable_mapping: {}
     };
-    setEditingFlow({
-      ...editingFlow,
-      messages: [...editingFlow.messages, newMsg]
-    });
+    setEditingFlow({ ...editingFlow, messages: [...editingFlow.messages, newMsg] });
   };
 
   const removeMessage = (idx: number) => {
@@ -194,6 +390,7 @@ export const AbandonedCartFlows: React.FC = () => {
     );
   }
 
+  // ─── Edit / Create view ──────────────────────────────────────────────────
   if (editingFlow) {
     return (
       <div className="page">
@@ -214,6 +411,7 @@ export const AbandonedCartFlows: React.FC = () => {
 
         {error && <div className="card"><div className="callout error">{error}</div></div>}
 
+        {/* Basic Info */}
         <div className="card mb-4">
           <div className="card-header"><div className="card-title">Basic Info</div></div>
           <div className="form-group">
@@ -246,11 +444,12 @@ export const AbandonedCartFlows: React.FC = () => {
           </div>
         </div>
 
+        {/* Messages */}
         <div className="card">
           <div className="card-header">
             <div>
               <div className="card-title">Follow-up Messages</div>
-              <div className="card-sub">Configure up to 5 messages with delays</div>
+              <div className="card-sub">Configure up to 5 messages with delays and variable mappings</div>
             </div>
             {editingFlow.messages.length < 5 && (
               <button className="btn btn-sm btn-secondary" onClick={addMessage}>
@@ -259,83 +458,119 @@ export const AbandonedCartFlows: React.FC = () => {
             )}
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {editingFlow.messages.map((msg, idx) => (
-              <div key={msg.id} style={{ padding: 16, background: 'var(--bg-subtle)', borderRadius: 6, borderLeft: '3px solid var(--primary)' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 12, marginBottom: 12 }}>
-                  <div className="form-group" style={{ marginBottom: 0 }}>
-                    <label className="form-label" style={{ fontSize: 12 }}>Message #{idx + 1}</label>
-                    <select
-                      className="select"
-                      value={msg.template_name}
-                      onChange={e => updateMessage(idx, 'template_name', e.target.value)}
-                    >
-                      <option value="">— select template —</option>
-                      {templates.map(t => (
-                        <option key={t.name} value={t.name}>
-                          {t.name} ({t.language}, {t.paramCount} var{t.paramCount !== 1 ? 's' : ''})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+            {editingFlow.messages.map((msg, idx) => {
+              const tpl = templates.find(t => t.name === msg.template_name);
+              const mapping = msg.variable_mapping || {};
 
-                  <div className="form-group" style={{ marginBottom: 0 }}>
-                    <label className="form-label" style={{ fontSize: 12 }}>Send After</label>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <input
-                        type="number"
-                        min={0}
-                        className="input"
-                        value={msg.delay_minutes}
-                        onChange={e => updateMessage(idx, 'delay_minutes', parseInt(e.target.value) || 0)}
-                        placeholder="0"
-                        style={{ flex: 1 }}
-                      />
-                      <select
-                        className="select"
-                        style={{ flex: 1 }}
-                        onChange={e => {
-                          const val = parseInt(e.target.value);
-                          updateMessage(idx, 'delay_minutes', val);
-                        }}
-                        value={msg.delay_minutes}
-                      >
-                        <option value="0">Immediately</option>
-                        <option value="30">30 minutes</option>
-                        <option value="60">1 hour</option>
-                        <option value="360">6 hours</option>
-                        <option value="1440">1 day</option>
-                        <option value="2880">2 days</option>
-                        <option value="4320">3 days</option>
-                      </select>
+              return (
+                <div
+                  key={msg.id}
+                  style={{
+                    padding: '16px 16px 14px',
+                    background: 'var(--bg-subtle)',
+                    borderRadius: 8,
+                    borderLeft: '3px solid var(--primary)',
+                    position: 'relative'
+                  }}
+                >
+                  {/* Header row: step badge + delete */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <div style={{
+                      fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1,
+                      color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: 6
+                    }}>
+                      <span style={{
+                        background: 'var(--primary)', color: '#fff',
+                        width: 20, height: 20, borderRadius: '50%',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 10, fontWeight: 700
+                      }}>{idx + 1}</span>
+                      Message {idx + 1}
                     </div>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
                     {editingFlow.messages.length > 1 && (
-                      <button
-                        className="btn btn-xs btn-danger"
-                        onClick={() => removeMessage(idx)}
-                      >
-                        Delete
+                      <button className="btn btn-xs btn-danger" onClick={() => removeMessage(idx)}>
+                        Remove
                       </button>
                     )}
                   </div>
-                </div>
 
-                {msg.template_name && templates.find(t => t.name === msg.template_name) && (
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
-                    <strong>Preview:</strong> {templates.find(t => t.name === msg.template_name)?.body?.substring(0, 100)}...
+                  {/* Template + delay row */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 0 }}>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label" style={{ fontSize: 12 }}>WhatsApp Template</label>
+                      <select
+                        className="select"
+                        value={msg.template_name}
+                        onChange={e => updateMessage(idx, 'template_name', e.target.value)}
+                      >
+                        <option value="">— select template —</option>
+                        {templates.map(t => (
+                          <option key={t.name} value={t.name}>
+                            {t.name} ({t.language} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}{t.buttons.length > 0 ? ` · ${t.buttons.length} btn` : ''})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label" style={{ fontSize: 12 }}>Send After</label>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <input
+                          type="number"
+                          min={0}
+                          className="input"
+                          value={msg.delay_minutes}
+                          onChange={e => updateMessage(idx, 'delay_minutes', parseInt(e.target.value) || 0)}
+                          placeholder="0"
+                          style={{ flex: 1 }}
+                        />
+                        <select
+                          className="select"
+                          style={{ flex: 1 }}
+                          onChange={e => updateMessage(idx, 'delay_minutes', parseInt(e.target.value))}
+                          value={msg.delay_minutes}
+                        >
+                          <option value="0">Immediately</option>
+                          <option value="30">30 minutes</option>
+                          <option value="60">1 hour</option>
+                          <option value="360">6 hours</option>
+                          <option value="1440">1 day</option>
+                          <option value="2880">2 days</option>
+                          <option value="4320">3 days</option>
+                        </select>
+                      </div>
+                    </div>
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {/* Variable mapper (shown only when template has variables/buttons) */}
+                  {tpl && (tpl.variables.length > 0 || tpl.buttons.length > 0) && (
+                    <VariableMapper
+                      template={tpl}
+                      mapping={mapping}
+                      onChange={m => updateMapping(idx, m)}
+                    />
+                  )}
+
+                  {/* Template selected but no variables */}
+                  {tpl && tpl.variables.length === 0 && tpl.buttons.length === 0 && (
+                    <div style={{
+                      marginTop: 10, fontSize: 11, color: 'var(--text-muted)',
+                      padding: '6px 10px', background: 'var(--bg-subtle)', borderRadius: 6
+                    }}>
+                      ✅ This template has no variable placeholders — it will be sent as-is.
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
     );
   }
 
+  // ─── List view ───────────────────────────────────────────────────────────
   return (
     <div className="page">
       <div className="page-header">
@@ -387,6 +622,9 @@ export const AbandonedCartFlows: React.FC = () => {
                       <td>
                         <div style={{ fontSize: 12 }}>
                           {flow.messages.length} message{flow.messages.length !== 1 ? 's' : ''}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          {flow.messages.map(m => m.template_name || '—').join(' → ')}
                         </div>
                       </td>
                       <td>

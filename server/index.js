@@ -864,16 +864,39 @@ app.get('/api/whatsapp/templates', async (req, res) => {
 
     const raw = body.message_templates || body.payload?.message_templates || [];
     const templates = raw.map(t => {
-      const bodyComp = (t.components || []).find(c => (c.type || '').toUpperCase() === 'BODY');
+      const comps = t.components || [];
+      const bodyComp = comps.find(c => (c.type || '').toUpperCase() === 'BODY');
       const text = bodyComp?.text || '';
-      const paramCount = (text.match(/\{\{\s*\d+\s*\}\}/g) || []).length;
+
+      // Extract each {{N}} placeholder in order (deduped, sorted numerically)
+      const placeholderSet = new Set((text.match(/\{\{\s*(\d+)\s*\}\}/g) || []).map(p => p.replace(/\s/g, '')));
+      const variables = [...placeholderSet]
+        .sort((a, b) => parseInt(a.replace(/\D/g, '')) - parseInt(b.replace(/\D/g, '')))
+        .map(p => ({ placeholder: p, index: parseInt(p.replace(/\D/g, '')) }));
+
+      // Extract dynamic-URL buttons
+      const buttonComps = comps.filter(c => (c.type || '').toUpperCase() === 'BUTTONS');
+      const buttons = [];
+      buttonComps.forEach(bc => {
+        const btns = Array.isArray(bc.buttons) ? bc.buttons : (bc.buttons ? [bc.buttons] : [bc]);
+        btns.forEach((btn, idx) => {
+          const urlText = btn.url || btn.text || '';
+          const hasVar = /\{\{\d+\}\}/.test(urlText);
+          if (hasVar || btn.type === 'URL') {
+            buttons.push({ index: idx, type: btn.type || 'URL', text: btn.text || 'Button', url: btn.url || '' });
+          }
+        });
+      });
+
       return {
         name: t.name,
         language: t.language || 'en',
         category: (t.category || 'UTILITY').toUpperCase(),
         status: t.status || '',
-        paramCount,
-        body: text
+        paramCount: variables.length,
+        body: text,
+        variables,
+        buttons
       };
     });
     res.json(templates);
