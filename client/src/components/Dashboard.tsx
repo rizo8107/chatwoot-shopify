@@ -28,17 +28,25 @@ export const Dashboard: React.FC<{ onNavigate?: (tab: any) => void }> = ({ onNav
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [lastRefresh, setLastRefresh] = useState(new Date());
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const load = async () => {
+    setError('');
     try {
+      // A stuck DB connection pool on the server must never hang this UI
+      // forever — bail out and show a retry option instead of spinning.
+      const signal = AbortSignal.timeout(12_000);
       const [mRes, tRes] = await Promise.all([
-        fetch(`${API}/metrics`),
-        fetch(`${API}/transactions?limit=10`)
+        fetch(`${API}/metrics`, { signal }),
+        fetch(`${API}/transactions?limit=10`, { signal })
       ]);
+      if (!mRes.ok || !tRes.ok) throw new Error('Failed to load dashboard data');
       setMetrics(await mRes.json());
       setTransactions(await tRes.json());
       setLastRefresh(new Date());
-    } catch (_) {}
+    } catch (err: any) {
+      setError(err.name === 'TimeoutError' ? 'Request timed out — the server may be busy.' : 'Failed to load dashboard data.');
+    }
     setLoading(false);
   };
 
@@ -65,6 +73,13 @@ export const Dashboard: React.FC<{ onNavigate?: (tab: any) => void }> = ({ onNav
           Refresh
         </button>
       </div>
+
+      {error && (
+        <div className="callout error" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <span>{error}</span>
+          <button className="btn btn-sm btn-secondary" onClick={load}>Retry</button>
+        </div>
+      )}
 
       {/* Metrics */}
       <div className="metrics-row">
@@ -101,6 +116,10 @@ export const Dashboard: React.FC<{ onNavigate?: (tab: any) => void }> = ({ onNav
         {loading ? (
           <div className="empty-state" style={{ padding: '30px' }}>
             <span className="spinner" />
+          </div>
+        ) : error ? (
+          <div className="empty-state">
+            <p className="text-dim">Couldn't load recent executions.</p>
           </div>
         ) : transactions.length === 0 ? (
           <div className="empty-state">

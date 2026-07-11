@@ -15,7 +15,18 @@ if (!connectionString) {
 const pool = new pg.Pool({
   connectionString,
   ssl: { rejectUnauthorized: false },
-  max: 10
+  max: 10,
+  // Recycle idle connections before InsForge's own proxy silently drops them —
+  // an unexpected drop (ECONNRESET) can otherwise leave the pool holding a
+  // dead connection slot indefinitely.
+  idleTimeoutMillis: 30_000,
+  // pg's default is 0 (wait forever) for acquiring a connection from the pool.
+  // If the pool is ever exhausted or stuck, queries must fail fast with a
+  // clear error instead of hanging — which is what caused the dashboard to
+  // spin forever waiting on /api/metrics and /api/transactions.
+  connectionTimeoutMillis: 10_000,
+  // Guard against any single query hanging the connection indefinitely.
+  statement_timeout: 15_000
 });
 
 pool.on('error', (err) => console.error('[DB] Idle client error:', err.message));
