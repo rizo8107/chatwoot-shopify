@@ -2,10 +2,12 @@ import { getPendingJobs, markJobStatus, getFlowById, logTransaction, getTransact
 import { executeFlowNode } from './chatwoot.js';
 import { processDueCampaignMessages } from './campaigns.js';
 import { processDueRetries } from './retries.js';
+import { processDueRecoveryJobs } from './recovery.js';
 
 let schedulerTimer = null;
 let campaignTimer = null;
 let retryTimer = null;
+let recoveryTimer = null;
 
 export function startScheduler() {
   if (!schedulerTimer) {
@@ -25,13 +27,20 @@ export function startScheduler() {
     }, 20_000);
     processDueRetries().catch(err => console.error('[Scheduler] Retry initial run error:', err.message));
   }
-  console.log('[Scheduler] Started — flow jobs 30s, campaigns 5s, retries 20s');
+  if (!recoveryTimer) {
+    recoveryTimer = setInterval(() => {
+      processDueRecoveryJobs().catch(err => console.error('[Scheduler] Recovery tick error:', err.message));
+    }, 30_000);
+    processDueRecoveryJobs().catch(err => console.error('[Scheduler] Recovery initial run error:', err.message));
+  }
+  console.log('[Scheduler] Started — flow jobs 30s, campaigns 5s, retries 20s, cart recovery 30s');
 }
 
 export function stopScheduler() {
   if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
   if (campaignTimer) { clearInterval(campaignTimer); campaignTimer = null; }
   if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
+  if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null; }
   console.log('[Scheduler] Stopped');
 }
 

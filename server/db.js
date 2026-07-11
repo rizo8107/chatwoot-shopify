@@ -224,6 +224,30 @@ export async function initDb() {
     )
   `);
 
+  // One row per (cart × recovery-flow message) — the schedule the recovery
+  // engine executes. UNIQUE on (checkout_token, flow_id, sequence_order) so
+  // Shopify's repeated checkouts/create + checkouts/update webhooks can never
+  // double-schedule the same follow-up.
+  await run(`
+    CREATE TABLE IF NOT EXISTS abandoned_cart_jobs (
+      id TEXT PRIMARY KEY,
+      cart_id TEXT NOT NULL,
+      checkout_token TEXT NOT NULL,
+      flow_id TEXT NOT NULL,
+      sequence_order INTEGER NOT NULL,
+      template_name TEXT NOT NULL,
+      variable_mapping TEXT NOT NULL DEFAULT '{}',
+      run_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (checkout_token, flow_id, sequence_order)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_ac_jobs_due ON abandoned_cart_jobs (status, run_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_ac_jobs_token ON abandoned_cart_jobs (checkout_token)`);
+
   console.log('[DB] Initialized (InsForge Postgres)');
 }
 
@@ -654,6 +678,61 @@ export async function updateAbandonedCartStatus(id, status, recovered_at = null)
     `UPDATE abandoned_carts SET status = ?, recovered_at = COALESCE(?, recovered_at), updated_at = ? WHERE id = ?`,
     [status, recovered_at, new Date().toISOString(), id]
   );
+}
+
+export async function getAbandonedCartByToken(checkout_token) {
+  const row = await get(`SELECT * FROM abandoned_carts WHERE checkout_token = ?`, [String(checkout_token)]);
+  if (row && row.cart_items) row.cart_items = JSON.parse(row.cart_items);
+  return row;
+}
+
+/** Mark a cart recovered by its Shopify checkout token (used when an order completes). */
+export async function markCartRecoveredByToken(checkout_token) {
+  const res = await run(
+    `UPDATE abandoned_carts SET status = 'recovered', recovered_at = ?, updated_at = ? WHERE checkout_token = ? AND status = 'abandoned'`,
+    [new Date().toISOString(), new Date().toISOString(), String(checkout_token)]
+  );
+  return res.changes > 0;
+}
+
+// ─── Abandoned Cart Recovery Jobs ─────────────────────────────────────────
+
+/** Insert one pending job per flow message. ON CONFLICT DO NOTHING keeps the
+ *  original schedule when repeated checkout webhooks re-trigger scheduling. */
+export async function scheduleAbandonedCartJob({ cart_id, checkout_token, flow_id, sequence_order, template_name, variable_mapping, run_at }) {
+  const id = `acj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const now = new Date().toISOString();
+  const res = await run(
+    `INSERT INTO abandoned_cart_jobs (id, cart_id, checkout_token, flow_id, sequence_order, template_name, variable_mapping, run_at, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+     ON CONFLICT (checkout_token, flow_id, sequence_order) DO NOTHING`,
+    [id, cart_id, String(checkout_token), flow_id, sequence_order, template_name, JSON.stringify(variable_mapping || {}), run_at, now, now]
+  );
+  return res.changes > 0;
+}
+
+export async function getDueAbandonedCartJobs(limit = 10) {
+  const rows = await all(
+    `SELECT * FROM abandoned_cart_jobs WHERE status = 'pending' AND run_at <= ? ORDER BY run_at ASC LIMIT ?`,
+    [new Date().toISOString(), limit]
+  );
+  return rows.map(r => ({ ...r, variable_mapping: JSON.parse(r.variable_mapping || '{}') }));
+}
+
+export async function updateAbandonedCartJob(id, { status, error_message }) {
+  await run(
+    `UPDATE abandoned_cart_jobs SET status = ?, error_message = ?, updated_at = ? WHERE id = ?`,
+    [status, error_message || null, new Date().toISOString(), id]
+  );
+}
+
+/** Cancel all not-yet-sent follow-ups for a checkout (customer completed the order). */
+export async function cancelAbandonedCartJobsForToken(checkout_token) {
+  const res = await run(
+    `UPDATE abandoned_cart_jobs SET status = 'cancelled', updated_at = ? WHERE checkout_token = ? AND status = 'pending'`,
+    [new Date().toISOString(), String(checkout_token)]
+  );
+  return res.changes;
 }
 
 export async function getAbandonedCartStats() {

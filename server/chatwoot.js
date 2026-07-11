@@ -453,7 +453,7 @@ export async function executeFlow(flow, context, startNodeId = null) {
 
 // ─── WhatsApp Send Helper ─────────────────────────────────────────────────
 
-async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey) {
+export async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey) {
   const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
   const token = settings.CHATWOOT_API_TOKEN;
   const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';

@@ -65,6 +65,7 @@ import {
 } from './chatwoot.js';
 
 import { startScheduler } from './scheduler.js';
+import { scheduleRecoveryForCart, cancelRecoveryForOrder } from './recovery.js';
 
 dotenv.config();
 
@@ -702,10 +703,22 @@ app.post('/api/webhook/shopify', async (req, res) => {
           shopify_checkout_url: rawBody.abandoned_checkout_url || rawBody.checkout_url || ''
         });
         console.log(`[Webhook] Tracked abandoned cart (${topic}): ${cartId}`);
+
+        // Kick off the Recovery Flow schedule for this cart. Idempotent —
+        // repeated create/update webhooks can't double-schedule a message.
+        scheduleRecoveryForCart(cartToken).catch(err =>
+          console.error('[Recovery] Scheduling failed:', err.message));
       }
     } catch (err) {
       console.error('[Webhook] Failed to track abandoned cart:', err.message);
     }
+  }
+
+  // Customer completed this checkout — mark the cart recovered and cancel any
+  // pending recovery follow-ups so buyers never get "you left items" messages.
+  if (topic.startsWith('orders/') && rawBody?.checkout_token) {
+    cancelRecoveryForOrder(rawBody.checkout_token).catch(err =>
+      console.error('[Recovery] Cancel-on-order failed:', err.message));
   }
 
   // Find matching active flows
