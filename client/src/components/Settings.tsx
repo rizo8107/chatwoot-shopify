@@ -21,6 +21,7 @@ interface Settings {
   SHOPIFY_APP_URL: string;
   WEBHOOK_MAX_RETRIES: string;
   ABANDONED_CARTS_ENABLED: string;
+  CHATWOOT_AUTOMATION_ASSIGNEE_ID: string;
   [key: string]: string;
 }
 
@@ -39,6 +40,7 @@ const EMPTY: Settings = {
   SHOPIFY_API_KEY: '', SHOPIFY_API_SECRET: '', SHOPIFY_SCOPES: 'read_orders,read_checkouts,read_fulfillments', SHOPIFY_APP_URL: '',
   WEBHOOK_MAX_RETRIES: '3',
   ABANDONED_CARTS_ENABLED: '1',
+  CHATWOOT_AUTOMATION_ASSIGNEE_ID: '',
 };
 
 interface TemplateInfo { name: string; language: string; category: string; paramCount: number; body: string; }
@@ -262,6 +264,20 @@ export const Settings: React.FC = () => {
               </button>
             </div>
             <div className="form-hint">When enabled, abandoned checkouts are automatically captured and tracked</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Automation Bot Agent ID</label>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              value={settings.CHATWOOT_AUTOMATION_ASSIGNEE_ID}
+              onChange={e => set('CHATWOOT_AUTOMATION_ASSIGNEE_ID', e.target.value)}
+              placeholder="Optional — e.g. 4"
+            />
+            <div className="form-hint">
+              If set, every conversation this app creates (campaigns, abandoned-cart, order/shipping) is assigned to this Chatwoot agent instead of being randomly assigned by the inbox's Default Policy. Find the ID in Chatwoot → Agents.
+            </div>
           </div>
         </div>
 

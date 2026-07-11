@@ -6,7 +6,7 @@ import {
   finalizeCampaignIfDone,
   logTransaction
 } from './db.js';
-import { normalizePhone, getTemplateBody, getTemplateButtons, renderTemplateBody, resolveContactId } from './chatwoot.js';
+import { normalizePhone, getTemplateBody, getTemplateButtons, renderTemplateBody, resolveContactId, buildConversationBody } from './chatwoot.js';
 
 let processing = false;
 
@@ -97,7 +97,7 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
 
   // 2. Open a conversation
   const convUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations`;
-  const convBody = { contact_id: contactId, inbox_id: inboxId, source_id: sourceId, status: 'open' };
+  const convBody = buildConversationBody({ contactId, inboxId, sourceId, settings });
   const convRes = await fetch(convUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', api_access_token: token },

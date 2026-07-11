@@ -6,6 +6,22 @@ function buildDedupeKey(scope, topic, context) {
   return `${scope}:${topic || 'unknown'}:${identifier}`;
 }
 
+/**
+ * Build the payload for POST /conversations. If CHATWOOT_AUTOMATION_ASSIGNEE_ID
+ * is configured, every conversation this app creates (campaigns, abandoned-cart
+ * notifications, order/shipping confirmations) is assigned to that agent up
+ * front — since it already has an owner, Chatwoot's own Inbox "Default Policy"
+ * auto-assignment has nothing to grab and won't round-robin it into a real
+ * agent's queue. Leave the setting empty to send no assignee_id (unchanged
+ * behavior — whatever the inbox's own policy does).
+ */
+export function buildConversationBody({ contactId, inboxId, sourceId, settings }) {
+  const body = { contact_id: contactId, inbox_id: inboxId, source_id: sourceId, status: 'open' };
+  const assigneeId = parseInt(settings?.CHATWOOT_AUTOMATION_ASSIGNEE_ID || '', 10);
+  if (Number.isInteger(assigneeId) && assigneeId > 0) body.assignee_id = assigneeId;
+  return body;
+}
+
 // ─── Extractors ────────────────────────────────────────────────────────────
 
 export function extractOrderDetails(body) {
@@ -476,7 +492,7 @@ async function sendWhatsAppTemplate(nodeData, context, settings, step, dedupeKey
     if (!conversationId) {
       // Create conversation
       const convUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations`;
-      const convBody = { contact_id: contactId, inbox_id: inboxId, source_id: context.sourceId, status: 'open' };
+      const convBody = buildConversationBody({ contactId, inboxId, sourceId: context.sourceId, settings });
       const convRes = await fetch(convUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', api_access_token: token }, body: JSON.stringify(convBody) });
       const convResBody = await convRes.json();
       if (!convRes.ok) throw new Error(`Create Conversation failed: ${convRes.status}`);
@@ -722,7 +738,7 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
 
     conversationId = await runStep('Create Conversation', async (step) => {
       const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations`;
-      const body = { contact_id: contactId, inbox_id: inboxId, source_id: context.sourceId, status: 'open' };
+      const body = buildConversationBody({ contactId, inboxId, sourceId: context.sourceId, settings });
       step.request = { url, method: 'POST', body };
       const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', api_access_token: token }, body: JSON.stringify(body) });
       const resBody = await res.json();
