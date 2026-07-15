@@ -144,6 +144,27 @@ function genId(prefix = 'tx') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function stableExecutionId(prefix, ...parts) {
+  const value = parts.map(part => String(part ?? '')).join('|');
+  return `${prefix}_${crypto.createHash('sha256').update(value).digest('hex').slice(0, 24)}`;
+}
+
+function shopifyExecutionKey(rawBody, topic, details) {
+  const bucket = topic.startsWith('orders/')
+    ? 'order'
+    : topic.startsWith('checkouts/')
+      ? 'checkout'
+      : topic.startsWith('fulfillments/')
+        ? 'fulfillment'
+        : topic;
+  const resourceId = topic.startsWith('checkouts/')
+    ? (rawBody?.token || rawBody?.id || details?.checkoutId)
+    : topic.startsWith('fulfillments/')
+      ? (rawBody?.id || rawBody?.order_id || details?.orderNumber)
+      : (rawBody?.id || details?.orderNumber);
+  return `${bucket}:${resourceId || details?.sourceId || details?.phone || 'unknown'}`;
+}
+
 // Queue a failed webhook/flow execution for automatic retry (first attempt in 1 min).
 async function queueRetry(transactionId, rawBody, topic, flowId) {
   try {
@@ -661,14 +682,15 @@ function parseWebhookPayload(req) {
 }
 
 app.post('/api/webhook/shopify', async (req, res) => {
-  const transactionId = genId('tx');
-
   let rawBody, topic, details;
   try {
     ({ rawBody, topic, details } = parseWebhookPayload(req));
   } catch (err) {
     return res.status(400).json({ success: false, error: `Payload parse error: ${err.message}` });
   }
+
+  const executionKey = shopifyExecutionKey(rawBody, topic, details);
+  const transactionId = stableExecutionId('tx', 'legacy', executionKey);
 
   // Respond immediately to Shopify
   res.status(202).json({ success: true, id: transactionId, message: 'Processing in background' });
@@ -721,13 +743,19 @@ app.post('/api/webhook/shopify', async (req, res) => {
       console.error('[Recovery] Cancel-on-order failed:', err.message));
   }
 
+  // Checkout events belong exclusively to Recovery Flows. They update the
+  // cart and its recovery schedule above, but must never fall through to the
+  // generic flow/legacy sender, which would send immediately and ignore the
+  // delay and variable mapping configured in Recovery Flows.
+  if (topic.startsWith('checkouts/')) return;
+
   // Find matching active flows
   const matchingFlows = await getFlowsByTrigger(topic).catch(() => []);
 
   if (matchingFlows.length > 0) {
     // Execute each matching flow
     for (const flow of matchingFlows) {
-      const flowTxId = genId('tx');
+      const flowTxId = stableExecutionId('tx', 'flow', flow.id, executionKey);
       await logTransaction({
         id: flowTxId, flow_id: flow.id,
         order_number: details.orderNumber, customer_name: details.fullName, phone_number: details.phone,
@@ -904,7 +932,7 @@ app.get('/api/whatsapp/templates', async (req, res) => {
         btns.forEach((btn, idx) => {
           const urlText = btn.url || btn.text || '';
           const hasVar = /\{\{\d+\}\}/.test(urlText);
-          if (hasVar || btn.type === 'URL') {
+          if (hasVar) {
             buttons.push({ index: idx, type: btn.type || 'URL', text: btn.text || 'Button', url: btn.url || '' });
           }
         });

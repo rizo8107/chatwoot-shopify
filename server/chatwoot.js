@@ -170,8 +170,10 @@ async function refreshTemplateCache(settings) {
           // Count how many {{N}} placeholders are in the button's URL or text
           const urlText = btn.url || btn.text || '';
           const varCount = (urlText.match(/\{\{\d+\}\}/g) || []).length;
-          if (varCount > 0 || btn.type === 'URL') {
-            buttons.push({ index: idx, type: btn.type || 'URL', varCount });
+          // Static URL buttons do not accept a parameter. Only expose buttons
+          // whose URL contains a placeholder such as {{1}}.
+          if (varCount > 0) {
+            buttons.push({ index: idx, type: btn.type || 'URL', varCount, url: btn.url || '' });
           }
         });
       });
@@ -198,6 +200,48 @@ export async function getTemplateButtons(settings, templateName) {
   if (!templateName) return [];
   await refreshTemplateCache(settings);
   return _templateCache.templates[templateName]?.buttons || [];
+}
+
+/**
+ * Convert Chatwoot template metadata plus our context mapping into the
+ * enhanced processed_params.buttons format expected by current Chatwoot.
+ *
+ * Chatwoot accepts: [{ type: 'url', parameter: 'https://...' }]
+ * (not Meta's lower-level component/index/parameters representation).
+ */
+export function buildTemplateButtonParams(templateButtons, context = {}, richMapping = null) {
+  if (!Array.isArray(templateButtons) || templateButtons.length === 0) return undefined;
+
+  return templateButtons.map(btn => {
+    const btnKey = `button_${btn.index}`;
+    const contextKey = richMapping?.[btnKey] || 'abandonedCheckoutUrl';
+    const targetUrl = context[contextKey]
+      || context.abandonedCheckoutUrl
+      || context.orderStatusUrl
+      || context.trackingUrl
+      || 'https://stomatalfarms.com';
+
+    // Meta URL templates store a fixed prefix/suffix around {{1}}. Chatwoot's
+    // `parameter` must contain only the dynamic portion, not the complete URL.
+    // Example: template `https://pay.example/{{1}}` + checkout URL
+    // `https://pay.example/cart/abc` must send `cart/abc`.
+    const pattern = String(btn.url || '');
+    const marker = pattern.match(/\{\{\s*\d+\s*\}\}/);
+    let parameter = String(targetUrl);
+    if (marker) {
+      const markerIndex = marker.index ?? 0;
+      const prefix = pattern.slice(0, markerIndex);
+      const suffix = pattern.slice(markerIndex + marker[0].length);
+      if (parameter.startsWith(prefix) && (!suffix || parameter.endsWith(suffix))) {
+        parameter = parameter.slice(prefix.length, suffix ? -suffix.length : undefined);
+      }
+    }
+
+    return {
+      type: String(btn.type || 'url').toLowerCase(),
+      parameter
+    };
+  });
 }
 
 /**
@@ -383,6 +427,20 @@ export async function executeFlowNode(node, context, settings, steps, flow = nul
  * Returns { status, steps, nextNodeId?, delayMs?, context }
  */
 export async function executeFlow(flow, context, startNodeId = null) {
+  if (flow?.trigger_event?.startsWith('checkouts/')) {
+    return {
+      status: 'success',
+      steps: [{
+        name: 'Recovery Flow Routing',
+        status: 'success',
+        response: { note: 'Checkout messaging is managed exclusively by Recovery Flows.' }
+      }],
+      context,
+      skipped: true,
+      skipReason: 'recovery_flow_managed'
+    };
+  }
+
   const { nodes, edges } = flow;
   const settings = await getAllSettings();
   const steps = [];
@@ -530,29 +588,13 @@ export async function sendWhatsAppTemplate(nodeData, context, settings, step, de
 
     // ── Build button params ──────────────────────────────────────────────
     const templateButtons = await getTemplateButtons(settings, templateName);
-    let processedParamsButton;
-    if (templateButtons.length > 0) {
-      processedParamsButton = templateButtons.map(btn => {
-        // Check if the rich mapping has an explicit field for this button
-        const btnKey = `button_${btn.index}`;
-        const buttonContextKey = richMapping?.[btnKey] || 'abandonedCheckoutUrl';
-        const buttonUrl = context[buttonContextKey]
-          || context.abandonedCheckoutUrl
-          || context.orderStatusUrl
-          || 'https://stomatalfarms.com';
-        return {
-          index: String(btn.index),
-          sub_type: 'url',
-          parameters: [{ type: 'text', text: buttonUrl }]
-        };
-      });
-    }
+    const processedParamsButtons = buildTemplateButtonParams(templateButtons, context, richMapping);
 
     const templateBody = await getTemplateBody(settings, templateName);
     const content = renderTemplateBody(templateBody, processedParamsBody) || `Template: ${templateName}`;
 
     const processedParams = { body: processedParamsBody };
-    if (processedParamsButton) processedParams.button = processedParamsButton;
+    if (processedParamsButtons) processedParams.buttons = processedParamsButtons;
 
     const msgUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
     const msgBody = {
@@ -647,13 +689,30 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
       ? extractFulfillmentDetails(rawBody)
       : extractOrderDetails(rawBody);
 
+  // Checkout messages must respect the delays, template, and variable mappings
+  // configured in Recovery Flows. This also protects test runs and old retry
+  // jobs from falling back to the abandoned-cart fields formerly in Settings.
+  if (isCheckout) {
+    return {
+      status: 'success',
+      orderDetails: context,
+      steps: [{
+        name: 'Recovery Flow Routing',
+        status: 'success',
+        response: { note: 'Checkout messaging is managed exclusively by Recovery Flows.' }
+      }],
+      skipped: true,
+      skipReason: 'recovery_flow_managed'
+    };
+  }
+
   const settings = await getAllSettings();
   const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
   const token = settings.CHATWOOT_API_TOKEN;
   const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
   const inboxId = parseInt(settings.CHATWOOT_INBOX_ID || '1', 10);
-  const templateName = isFulfillment ? settings.WHATSAPP_SHIPPING_TEMPLATE_NAME : isCheckout ? settings.WHATSAPP_ABANDONED_CART_TEMPLATE_NAME : settings.WHATSAPP_TEMPLATE_NAME;
-  const templateMapping = isFulfillment ? settings.WHATSAPP_SHIPPING_TEMPLATE_MAPPING : isCheckout ? settings.WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING : settings.WHATSAPP_TEMPLATE_MAPPING;
+  const templateName = isFulfillment ? settings.WHATSAPP_SHIPPING_TEMPLATE_NAME : settings.WHATSAPP_TEMPLATE_NAME;
+  const templateMapping = isFulfillment ? settings.WHATSAPP_SHIPPING_TEMPLATE_MAPPING : settings.WHATSAPP_TEMPLATE_MAPPING;
 
   const runStep = async (name, fn) => {
     const step = { name, status: 'pending', startedAt: new Date().toISOString(), endedAt: null, durationMs: 0, request: null, response: null, error: null };
@@ -678,7 +737,7 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
   // and orders/paid both send the same order-confirmation template below, and
   // Shopify fires both within seconds for prepaid orders — without this, the
   // customer gets two copies of the identical message.
-  const templateBucket = isFulfillment ? 'fulfillment' : isCheckout ? 'checkout' : 'order';
+  const templateBucket = isFulfillment ? 'fulfillment' : 'order';
   const dedupeKey = buildDedupeKey('legacy', templateBucket, context);
 
   try {
@@ -762,21 +821,10 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
 
       // Build button params — supply the checkout/order URL for dynamic-URL buttons
       const templateButtons = await getTemplateButtons(settings, templateName);
-      const processedParamsButton = templateButtons.length > 0
-        ? templateButtons.map(btn => ({
-            index: String(btn.index),
-            sub_type: 'url',
-            parameters: [
-              {
-                type: 'text',
-                text: context.abandonedCheckoutUrl || context.orderStatusUrl || 'https://stomatalfarms.com'
-              }
-            ]
-          }))
-        : undefined;
+      const processedParamsButtons = buildTemplateButtonParams(templateButtons, context);
 
       const processedParams = { body: processedParamsBody };
-      if (processedParamsButton) processedParams.button = processedParamsButton;
+      if (processedParamsButtons) processedParams.buttons = processedParamsButtons;
 
       const templateBody = await getTemplateBody(settings, templateName);
       const content = renderTemplateBody(templateBody, processedParamsBody) || `Template: ${templateName}`;

@@ -11,94 +11,110 @@ import { AbandonedCarts } from './components/AbandonedCarts';
 import { AbandonedCartFlows } from './components/AbandonedCartFlows';
 
 type Tab = 'dashboard' | 'flows' | 'campaigns' | 'contacts' | 'abandoned-carts' | 'abandoned-cart-flows' | 'logs' | 'settings' | 'test';
+type NavSection = 'Workspace' | 'Recovery' | 'System';
 
-const NAV = [
-  {
-    id: 'dashboard' as Tab,
-    label: 'Dashboard',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/>
-        <rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/>
-      </svg>
-    )
-  },
-  {
-    id: 'flows' as Tab,
-    label: 'Flows',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="5" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/>
-        <path d="M5 8v2a4 4 0 0 0 4 4h2"/><path d="M14 12h2a4 4 0 0 1 4 4v2"/><path d="M21 8V6"/>
-      </svg>
-    )
-  },
-  {
-    id: 'campaigns' as Tab,
-    label: 'Campaigns',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>
-      </svg>
-    )
-  },
-  {
-    id: 'contacts' as Tab,
-    label: 'Contacts',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-      </svg>
-    )
-  },
-  {
-    id: 'abandoned-carts' as Tab,
-    label: 'Abandoned Carts',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/><path d="M6 6h14"/>
-      </svg>
-    )
-  },
-  {
-    id: 'abandoned-cart-flows' as Tab,
-    label: 'Recovery Flows',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-      </svg>
-    )
-  },
-  {
-    id: 'logs' as Tab,
-    label: 'Logs',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
-        <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
-      </svg>
-    )
-  },
-  {
-    id: 'test' as Tab,
-    label: 'Test Console',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
-      </svg>
-    )
-  },
-  {
-    id: 'settings' as Tab,
-    label: 'Settings',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="3"/>
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-      </svg>
-    )
-  }
+const ICONS: Record<Tab, React.ReactNode> = {
+  dashboard: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="4" rx="1"/><rect x="14" y="11" width="7" height="10" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></>,
+  flows: <><circle cx="5" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="18" r="2"/><path d="M6.5 7.5 10.5 11M13.5 13.5l4 3"/></>,
+  campaigns: <><path d="M3 11l18-5v12L3 14v-3z"/><path d="M8 15.3V19a2 2 0 0 0 2 2h1"/></>,
+  contacts: <><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M16 5a4 4 0 0 1 0 7M19 15a6 6 0 0 1 3 6"/></>,
+  'abandoned-carts': <><circle cx="9" cy="20" r="1"/><circle cx="19" cy="20" r="1"/><path d="M3 4h2l2.4 10.4A2 2 0 0 0 9.3 16H18a2 2 0 0 0 1.9-1.4L22 7H6"/></>,
+  'abandoned-cart-flows': <><path d="M20 7h-6V1"/><path d="M4 17h6v6"/><path d="M5.1 9A8 8 0 0 1 19 5l1 2M4 17l1 2a8 8 0 0 0 13.9-4"/></>,
+  logs: <><path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6M9 13h8M9 17h8"/></>,
+  test: <><path d="m4 17 6-6-6-6M12 19h8"/></>,
+  settings: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21h-4v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1-2.8-2.8.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3v-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1 2.8-2.8.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3h4v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1 2.8 2.8-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1h.2v4h-.2a1.7 1.7 0 0 0-1.4 1z"/></>,
+};
+
+const NAV: { id: Tab; label: string; section: NavSection }[] = [
+  { id: 'dashboard', label: 'Overview', section: 'Workspace' },
+  { id: 'flows', label: 'Automations', section: 'Workspace' },
+  { id: 'campaigns', label: 'Campaigns', section: 'Workspace' },
+  { id: 'contacts', label: 'Contacts', section: 'Workspace' },
+  { id: 'abandoned-carts', label: 'Abandoned carts', section: 'Recovery' },
+  { id: 'abandoned-cart-flows', label: 'Recovery flows', section: 'Recovery' },
+  { id: 'logs', label: 'Execution logs', section: 'System' },
+  { id: 'test', label: 'Test console', section: 'System' },
+  { id: 'settings', label: 'Settings', section: 'System' },
 ];
+
+const SECTION_ORDER: NavSection[] = ['Workspace', 'Recovery', 'System'];
+
+function NavIcon({ tab }: { tab: Tab }) {
+  return <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{ICONS[tab]}</svg>;
+}
+
+function AppShell({ tab, setTab, authRequired, logout, children }: {
+  tab: Tab;
+  setTab: (tab: Tab) => void;
+  authRequired: boolean;
+  logout: () => void;
+  children: React.ReactNode;
+}) {
+  const current = NAV.find(item => item.id === tab);
+
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          <div className="brand-mark" aria-hidden="true">S</div>
+          <div>
+            <div className="sidebar-brand-name">Stomatal</div>
+            <div className="sidebar-brand-sub">Commerce operations</div>
+          </div>
+        </div>
+
+        <nav className="sidebar-nav" aria-label="Primary navigation">
+          {SECTION_ORDER.map(section => (
+            <div className="nav-section" key={section}>
+              <div className="sidebar-section-label">{section}</div>
+              {NAV.filter(item => item.section === section).map(item => (
+                <button
+                  key={item.id}
+                  className={`nav-item${tab === item.id ? ' active' : ''}`}
+                  onClick={() => setTab(item.id)}
+                  aria-current={tab === item.id ? 'page' : undefined}
+                >
+                  <NavIcon tab={item.id} />
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="workspace-profile">
+            <div className="profile-avatar">SF</div>
+            <div className="profile-copy">
+              <strong>Stomatal Farms</strong>
+              <span>Production workspace</span>
+            </div>
+          </div>
+          {authRequired && (
+            <button className="logout-button" onClick={logout}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+              Sign out
+            </button>
+          )}
+        </div>
+      </aside>
+
+      <section className="workspace">
+        <header className="workspace-header">
+          <div>
+            <div className="workspace-eyebrow">Stomatal Farms / {current?.section}</div>
+            <div className="workspace-title">{current?.label}</div>
+          </div>
+          <div className="workspace-actions">
+            <span className="environment-pill"><span /> Live</span>
+            <div className="header-avatar">SF</div>
+          </div>
+        </header>
+        <main className={`main${tab === 'flows' ? ' flow-route' : ''}`}>{children}</main>
+      </section>
+    </div>
+  );
+}
 
 const App: React.FC = () => {
   const [tab, setTab] = useState<Tab>('dashboard');
@@ -130,74 +146,13 @@ const App: React.FC = () => {
     }
   };
 
-  if (auth.loading) {
-    return <div className="app" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><span className="spinner" /></div>;
-  }
-  if (auth.required && !auth.ok) {
-    return <Login onSuccess={() => setAuth(a => ({ ...a, ok: true }))} />;
-  }
-
-  // FlowBuilder handles its own full-screen layout
-  if (tab === 'flows') {
-    return (
-      <div className="app">
-        <aside className="sidebar">
-          <div className="sidebar-brand">
-            <div className="sidebar-brand-name">Stomatal Farms</div>
-            <div className="sidebar-brand-sub">Chatwoot Automation</div>
-          </div>
-          <nav className="sidebar-nav">
-            {NAV.map(item => (
-              <button key={item.id} className={`nav-item${tab === item.id ? ' active' : ''}`} onClick={() => setTab(item.id)}>
-                {item.icon}{item.label}
-              </button>
-            ))}
-          </nav>
-          <div className="sidebar-footer">
-            {auth.required && (
-              <button className="nav-item" onClick={logout} style={{ width: '100%', marginBottom: 8 }}>
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-                Log out
-              </button>
-            )}
-            v2.0.0
-          </div>
-        </aside>
-        <div className="main" style={{ padding: 0, overflow: 'hidden' }}>
-          <FlowBuilder />
-        </div>
-      </div>
-    );
-  }
+  if (auth.loading) return <div className="app-loading"><span className="spinner" /><span>Loading workspace</span></div>;
+  if (auth.required && !auth.ok) return <Login onSuccess={() => setAuth(a => ({ ...a, ok: true }))} />;
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="sidebar-brand">
-          <div className="sidebar-brand-name">Stomatal Farms</div>
-          <div className="sidebar-brand-sub">Chatwoot Automation</div>
-        </div>
-        <nav className="sidebar-nav">
-          {NAV.map(item => (
-            <button key={item.id} className={`nav-item${tab === item.id ? ' active' : ''}`} onClick={() => setTab(item.id)}>
-              {item.icon}{item.label}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          {auth.required && (
-            <button className="nav-item" onClick={logout} style={{ width: '100%', marginBottom: 8 }}>
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-              Log out
-            </button>
-          )}
-          v2.0.0
-        </div>
-      </aside>
-      <main className="main">
-        {renderContent()}
-      </main>
-    </div>
+    <AppShell tab={tab} setTab={setTab} authRequired={auth.required} logout={logout}>
+      {renderContent()}
+    </AppShell>
   );
 };
 

@@ -6,7 +6,10 @@ import {
   finalizeCampaignIfDone,
   logTransaction
 } from './db.js';
-import { normalizePhone, getTemplateBody, getTemplateButtons, renderTemplateBody, resolveContactId, buildConversationBody } from './chatwoot.js';
+import {
+  normalizePhone, getTemplateBody, getTemplateButtons, renderTemplateBody,
+  resolveContactId, buildConversationBody, buildTemplateButtonParams
+} from './chatwoot.js';
 
 let processing = false;
 
@@ -116,21 +119,12 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
   // Build button params — if the template has dynamic-URL buttons, supply the URL
   // from processedParams or a sensible fallback.
   const templateButtons = await getTemplateButtons(settings, templateName);
-  const processedParamsButton = templateButtons.length > 0
-    ? templateButtons.map(btn => ({
-        index: String(btn.index),
-        sub_type: 'url',
-        parameters: [
-          {
-            type: 'text',
-            text: processedParams?.checkoutUrl || processedParams?.url || 'https://stomatalfarms.com'
-          }
-        ]
-      }))
-    : undefined;
+  const processedParamsButtons = buildTemplateButtonParams(templateButtons, {
+    abandonedCheckoutUrl: processedParams?.checkoutUrl || processedParams?.url
+  });
 
   const finalProcessedParams = { body: processedParams || {} };
-  if (processedParamsButton) finalProcessedParams.button = processedParamsButton;
+  if (processedParamsButtons) finalProcessedParams.buttons = processedParamsButtons;
 
   const msgUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
   const msgBody = {

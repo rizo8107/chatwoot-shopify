@@ -160,12 +160,12 @@ export const Dashboard: React.FC<{ onNavigate?: (tab: any) => void }> = ({ onNav
       {/* Quick Links */}
       <div className="flex gap-3 mt-4">
         <div className="card" style={{ flex: 1 }}>
-          <div className="card-title" style={{ marginBottom: 8 }}>⚡ Webhook URL</div>
+          <div className="card-title" style={{ marginBottom: 8 }}>Shopify webhook</div>
           <div className="text-sm text-muted" style={{ marginBottom: 10 }}>Add this URL in Shopify → Settings → Notifications → Webhooks</div>
           <WebhookUrlDisplay />
         </div>
         <div className="card" style={{ flex: 1 }}>
-          <div className="card-title" style={{ marginBottom: 8 }}>🔄 Active Flows</div>
+          <div className="card-title" style={{ marginBottom: 8 }}>Automation workspace</div>
           <div className="text-sm text-muted" style={{ marginBottom: 10 }}>Build and manage automation flows with drag-and-drop</div>
           <button className="btn btn-secondary btn-sm w-full" onClick={() => onNavigate?.('flows')}>Open Flow Builder →</button>
         </div>

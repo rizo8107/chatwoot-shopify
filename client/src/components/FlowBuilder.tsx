@@ -34,8 +34,6 @@ interface Flow {
 }
 
 const TRIGGER_EVENTS = [
-  { value: 'checkouts/create', label: 'Checkout Created (Abandoned Cart)' },
-  { value: 'checkouts/update', label: 'Checkout Updated' },
   { value: 'orders/create', label: 'Order Created' },
   { value: 'orders/paid', label: 'Order Paid' },
   { value: 'fulfillments/create', label: 'Fulfillment Created (Shipped)' },
@@ -58,10 +56,10 @@ const OPERATORS = [
 const DELAY_UNITS = ['minutes', 'hours', 'days'];
 
 const NODE_PALETTE = [
-  { type: 'delay', label: 'Delay', emoji: '⏱', desc: 'Wait before next step', color: 'var(--yellow)' },
-  { type: 'condition', label: 'Condition', emoji: '◇', desc: 'Branch on field value', color: 'var(--blue)' },
-  { type: 'whatsapp', label: 'Send WhatsApp', emoji: '💬', desc: 'Send template message', color: 'var(--green)' },
-  { type: 'fetchShopify', label: 'Fetch Shopify', emoji: '🛍', desc: 'Fetch order/checkout data', color: 'var(--text-muted)' },
+  { type: 'delay', label: 'Delay', emoji: 'DL', desc: 'Wait before next step', color: 'var(--yellow)' },
+  { type: 'condition', label: 'Condition', emoji: 'IF', desc: 'Branch on field value', color: 'var(--blue)' },
+  { type: 'whatsapp', label: 'Send WhatsApp', emoji: 'WA', desc: 'Send template message', color: 'var(--green)' },
+  { type: 'fetchShopify', label: 'Fetch Shopify', emoji: 'SH', desc: 'Fetch order/checkout data', color: 'var(--text-muted)' },
 ];
 
 function genId(prefix = 'node') {
@@ -71,7 +69,7 @@ function genId(prefix = 'node') {
 function makeDefaultNode(type: string, position: { x: number; y: number }): Node {
   const id = genId(type);
   const baseData: Record<string, any> = { label: type };
-  if (type === 'trigger') { baseData.event = 'checkouts/create'; baseData.label = 'Trigger'; }
+  if (type === 'trigger') { baseData.event = 'orders/create'; baseData.label = 'Trigger'; }
   if (type === 'delay') { baseData.duration = 1; baseData.unit = 'hours'; baseData.label = 'Delay'; }
   if (type === 'condition') { baseData.field = 'phone'; baseData.operator = 'exists'; baseData.value = ''; baseData.label = 'Condition'; }
   if (type === 'whatsapp') { baseData.templateName = ''; baseData.templateMapping = ''; baseData.label = 'Send WhatsApp'; }
@@ -85,7 +83,7 @@ function TriggerNode({ data, selected }: NodeProps) {
   const ev = TRIGGER_EVENTS.find(e => e.value === (data as any).event);
   return (
     <div className={`rf-node trigger${selected ? ' selected' : ''}`}>
-      <div className="rf-node-icon">⚡</div>
+      <div className="rf-node-icon">TR</div>
       <div className="rf-node-label">Trigger</div>
       <div className="rf-node-title">{ev?.label || (data as any).event || 'Select Event'}</div>
       <Handle type="source" position={Position.Bottom} style={{ background: 'var(--accent)' }} />
@@ -98,7 +96,7 @@ function DelayNode({ data, selected }: NodeProps) {
   return (
     <div className={`rf-node delay${selected ? ' selected' : ''}`}>
       <Handle type="target" position={Position.Top} style={{ background: 'var(--yellow)' }} />
-      <div className="rf-node-icon">⏱</div>
+      <div className="rf-node-icon">DL</div>
       <div className="rf-node-label">Delay</div>
       <div className="rf-node-title">Wait {d.duration || 1} {d.unit || 'hours'}</div>
       <Handle type="source" position={Position.Bottom} style={{ background: 'var(--yellow)' }} />
@@ -111,7 +109,7 @@ function ConditionNode({ data, selected }: NodeProps) {
   return (
     <div className={`rf-node condition${selected ? ' selected' : ''}`}>
       <Handle type="target" position={Position.Top} style={{ background: 'var(--blue)' }} />
-      <div className="rf-node-icon">◇</div>
+      <div className="rf-node-icon">IF</div>
       <div className="rf-node-label">Condition</div>
       <div className="rf-node-title">{d.field || 'field'} {d.operator || 'exists'}</div>
       {d.value && <div className="rf-node-sub">value: {d.value}</div>}
@@ -130,7 +128,7 @@ function WhatsAppNode({ data, selected }: NodeProps) {
   return (
     <div className={`rf-node whatsapp${selected ? ' selected' : ''}`}>
       <Handle type="target" position={Position.Top} style={{ background: 'var(--green)' }} />
-      <div className="rf-node-icon">💬</div>
+      <div className="rf-node-icon">WA</div>
       <div className="rf-node-label">Send WhatsApp</div>
       <div className="rf-node-title">{d.templateName || 'Select template'}</div>
       {d.templateMapping && <div className="rf-node-sub">vars: {d.templateMapping}</div>}
@@ -144,7 +142,7 @@ function FetchShopifyNode({ data, selected }: NodeProps) {
   return (
     <div className={`rf-node fetchShopify${selected ? ' selected' : ''}`}>
       <Handle type="target" position={Position.Top} />
-      <div className="rf-node-icon">🛍</div>
+      <div className="rf-node-icon">SH</div>
       <div className="rf-node-label">Fetch Shopify</div>
       <div className="rf-node-title">Fetch {d.fetchType || 'order'} data</div>
       <Handle type="source" position={Position.Bottom} />

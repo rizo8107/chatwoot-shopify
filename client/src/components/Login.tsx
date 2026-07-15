@@ -91,7 +91,7 @@ export const Login: React.FC<{ onSuccess: () => void }> = ({ onSuccess }) => {
         justifyContent: 'center',
         padding: 20,
         background:
-          'radial-gradient(ellipse 900px 600px at 50% -10%, rgba(31, 224, 138, 0.08), transparent 60%), var(--bg)'
+          'var(--bg)'
       }}
     >
       <div className="card" style={{ width: '100%', maxWidth: 380, padding: 32 }}>

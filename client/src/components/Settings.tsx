@@ -11,8 +11,6 @@ interface Settings {
   WHATSAPP_TEMPLATE_MAPPING: string;
   WHATSAPP_SHIPPING_TEMPLATE_NAME: string;
   WHATSAPP_SHIPPING_TEMPLATE_MAPPING: string;
-  WHATSAPP_ABANDONED_CART_TEMPLATE_NAME: string;
-  WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING: string;
   SHOPIFY_STORE_URL: string;
   SHOPIFY_ADMIN_TOKEN: string;
   SHOPIFY_API_KEY: string;
@@ -35,7 +33,6 @@ const EMPTY: Settings = {
   CHATWOOT_API_URL: '', CHATWOOT_API_TOKEN: '', CHATWOOT_ACCOUNT_ID: '', CHATWOOT_INBOX_ID: '',
   WHATSAPP_TEMPLATE_NAME: '', WHATSAPP_TEMPLATE_MAPPING: '',
   WHATSAPP_SHIPPING_TEMPLATE_NAME: '', WHATSAPP_SHIPPING_TEMPLATE_MAPPING: '',
-  WHATSAPP_ABANDONED_CART_TEMPLATE_NAME: '', WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING: '',
   SHOPIFY_STORE_URL: '', SHOPIFY_ADMIN_TOKEN: '',
   SHOPIFY_API_KEY: '', SHOPIFY_API_SECRET: '', SHOPIFY_SCOPES: 'read_orders,read_checkouts,read_fulfillments', SHOPIFY_APP_URL: '',
   WEBHOOK_MAX_RETRIES: '3',
@@ -215,7 +212,7 @@ export const Settings: React.FC = () => {
 
       {/* Chatwoot */}
       <div className="card mb-4">
-        <div className="card-header"><div className="card-title">🟣 Chatwoot Configuration</div></div>
+        <div className="card-header"><div className="card-title">Chatwoot configuration</div></div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 20px' }}>
           <div className="form-group">
@@ -308,7 +305,7 @@ export const Settings: React.FC = () => {
       <div className="card mb-4">
         <div className="card-header">
           <div>
-            <div className="card-title">🛍 Shopify</div>
+            <div className="card-title">Shopify connection</div>
             <div className="card-sub">Connect your store via OAuth to read orders & abandoned checkouts and auto-register webhooks</div>
           </div>
           {shopStatus && (
@@ -388,8 +385,8 @@ export const Settings: React.FC = () => {
       <div className="card mb-4">
         <div className="card-header">
           <div>
-            <div className="card-title">💬 WhatsApp Templates (Legacy / Fallback)</div>
-            <div className="card-sub">Used when no matching flow is active. Each Send WhatsApp node can override these.</div>
+            <div className="card-title">Order and shipping templates</div>
+            <div className="card-sub">Fallbacks for order and fulfillment events. Abandoned-cart templates and timing are configured only in Recovery Flows.</div>
           </div>
         </div>
 
@@ -411,18 +408,6 @@ export const Settings: React.FC = () => {
           hint="Maps fulfillment fields to template variables"
           templateKey="WHATSAPP_SHIPPING_TEMPLATE_NAME"
           mappingKey="WHATSAPP_SHIPPING_TEMPLATE_MAPPING"
-          settings={settings}
-          onChange={set}
-          templates={templates}
-        />
-
-        <div className="divider" />
-        <div className="divider-label mb-4"><span>Abandoned Cart</span></div>
-        <MappingInput
-          label="Variable Mapping"
-          hint="Maps checkout fields to template variables"
-          templateKey="WHATSAPP_ABANDONED_CART_TEMPLATE_NAME"
-          mappingKey="WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING"
           settings={settings}
           onChange={set}
           templates={templates}

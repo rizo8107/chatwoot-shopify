@@ -266,14 +266,40 @@ export async function logTransaction({ id, flow_id, order_number, customer_name,
 }
 
 export async function getTransactions(limit = 100, offset = 0, status = null) {
+  // Older versions created a fresh random transaction id for every Shopify
+  // delivery, so orders/create + orders/paid and webhook retries appeared as
+  // duplicate executions. Keep the newest representative of each logical
+  // webhook/flow execution. Other types (campaign/recovery/test) remain
+  // individually visible.
+  const grouped = `
+    WITH ranked AS (
+      SELECT
+        id, flow_id, order_number, customer_name, phone_number, status, type,
+        created_at, error_message, delivery_status,
+        ROW_NUMBER() OVER (
+          PARTITION BY CASE
+            WHEN type IN ('webhook', 'flow') AND NULLIF(order_number, '') IS NOT NULL
+              THEN CONCAT(type, '|', COALESCE(flow_id, ''), '|order|', order_number)
+            WHEN type IN ('webhook', 'flow') AND NULLIF(phone_number, '') IS NOT NULL
+              THEN CONCAT(type, '|', COALESCE(flow_id, ''), '|contact|', phone_number, '|', SUBSTRING(created_at, 1, 13))
+            ELSE id
+          END
+          ORDER BY created_at DESC
+        ) AS duplicate_rank
+      FROM transactions
+    )`;
   if (status && status !== 'all') {
     return all(
-      `SELECT id, flow_id, order_number, customer_name, phone_number, status, type, created_at, error_message, delivery_status FROM transactions WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      `${grouped}
+       SELECT id, flow_id, order_number, customer_name, phone_number, status, type, created_at, error_message, delivery_status
+       FROM ranked WHERE duplicate_rank = 1 AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       [status, limit, offset]
     );
   }
   return all(
-    `SELECT id, flow_id, order_number, customer_name, phone_number, status, type, created_at, error_message, delivery_status FROM transactions ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    `${grouped}
+     SELECT id, flow_id, order_number, customer_name, phone_number, status, type, created_at, error_message, delivery_status
+     FROM ranked WHERE duplicate_rank = 1 ORDER BY created_at DESC LIMIT ? OFFSET ?`,
     [limit, offset]
   );
 }
@@ -337,12 +363,27 @@ export async function markNotificationFailed(dedupeKey) {
 
 export async function getMetrics() {
   const stats = await get(`
+    WITH ranked AS (
+      SELECT status,
+        ROW_NUMBER() OVER (
+          PARTITION BY CASE
+            WHEN type IN ('webhook', 'flow') AND NULLIF(order_number, '') IS NOT NULL
+              THEN CONCAT(type, '|', COALESCE(flow_id, ''), '|order|', order_number)
+            WHEN type IN ('webhook', 'flow') AND NULLIF(phone_number, '') IS NOT NULL
+              THEN CONCAT(type, '|', COALESCE(flow_id, ''), '|contact|', phone_number, '|', SUBSTRING(created_at, 1, 13))
+            ELSE id
+          END
+          ORDER BY created_at DESC
+        ) AS duplicate_rank
+      FROM transactions
+    )
     SELECT 
       COUNT(*) as total,
       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success,
       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
       SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing
-    FROM transactions
+    FROM ranked
+    WHERE duplicate_rank = 1
   `);
   return {
     total: Number(stats.total) || 0,
@@ -358,7 +399,6 @@ const SETTING_KEYS = [
   'CHATWOOT_API_URL', 'CHATWOOT_API_TOKEN', 'CHATWOOT_ACCOUNT_ID', 'CHATWOOT_INBOX_ID',
   'WHATSAPP_TEMPLATE_NAME', 'WHATSAPP_TEMPLATE_MAPPING',
   'WHATSAPP_SHIPPING_TEMPLATE_NAME', 'WHATSAPP_SHIPPING_TEMPLATE_MAPPING',
-  'WHATSAPP_ABANDONED_CART_TEMPLATE_NAME', 'WHATSAPP_ABANDONED_CART_TEMPLATE_MAPPING',
   'SHOPIFY_STORE_URL', 'SHOPIFY_ADMIN_TOKEN',
   'SHOPIFY_API_KEY', 'SHOPIFY_API_SECRET', 'SHOPIFY_SCOPES', 'SHOPIFY_APP_URL',
   'WEBHOOK_MAX_RETRIES', 'CHATWOOT_AUTOMATION_ASSIGNEE_ID'
@@ -697,15 +737,24 @@ export async function markCartRecoveredByToken(checkout_token) {
 
 // ─── Abandoned Cart Recovery Jobs ─────────────────────────────────────────
 
-/** Insert one pending job per flow message. ON CONFLICT DO NOTHING keeps the
- *  original schedule when repeated checkout webhooks re-trigger scheduling. */
+/** Insert one pending job per flow message. Repeated checkout updates keep
+ *  pending/sent jobs untouched, but requeue failed/skipped jobs after fresher
+ *  customer data or a corrected template mapping becomes available. */
 export async function scheduleAbandonedCartJob({ cart_id, checkout_token, flow_id, sequence_order, template_name, variable_mapping, run_at }) {
   const id = `acj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const now = new Date().toISOString();
   const res = await run(
     `INSERT INTO abandoned_cart_jobs (id, cart_id, checkout_token, flow_id, sequence_order, template_name, variable_mapping, run_at, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-     ON CONFLICT (checkout_token, flow_id, sequence_order) DO NOTHING`,
+     ON CONFLICT (checkout_token, flow_id, sequence_order) DO UPDATE SET
+       cart_id = EXCLUDED.cart_id,
+       template_name = EXCLUDED.template_name,
+       variable_mapping = EXCLUDED.variable_mapping,
+       run_at = EXCLUDED.run_at,
+       status = 'pending',
+       error_message = NULL,
+       updated_at = EXCLUDED.updated_at
+     WHERE abandoned_cart_jobs.status IN ('failed', 'skipped')`,
     [id, cart_id, String(checkout_token), flow_id, sequence_order, template_name, JSON.stringify(variable_mapping || {}), run_at, now, now]
   );
   return res.changes > 0;

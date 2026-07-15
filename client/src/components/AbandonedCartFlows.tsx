@@ -279,6 +279,19 @@ export const AbandonedCartFlows: React.FC = () => {
     }
 
     try {
+      // The button selector visually defaults to the checkout URL. Persist
+      // that default as well, including for flows created before button
+      // mappings were stored explicitly.
+      const messages = editingFlow.messages.map(message => {
+        const template = templates.find(t => t.name === message.template_name);
+        const variable_mapping = { ...(message.variable_mapping || {}) };
+        template?.buttons.forEach(button => {
+          const key = `button_${button.index}`;
+          if (!variable_mapping[key]) variable_mapping[key] = 'abandonedCheckoutUrl';
+        });
+        return { ...message, variable_mapping };
+      });
+
       const method = isCreating ? 'POST' : 'PUT';
       const endpoint = isCreating
         ? `${API}/abandoned-cart-flows`
@@ -291,7 +304,7 @@ export const AbandonedCartFlows: React.FC = () => {
           name: editingFlow.name,
           description: editingFlow.description,
           is_active: editingFlow.is_active,
-          messages: editingFlow.messages
+          messages
         })
       });
 
@@ -337,7 +350,12 @@ export const AbandonedCartFlows: React.FC = () => {
     updated.messages[idx] = { ...updated.messages[idx], [field]: value };
     // When template changes, reset the mapping
     if (field === 'template_name') {
-      updated.messages[idx].variable_mapping = {};
+      const template = templates.find(t => t.name === value);
+      const defaults: VariableMapping = {};
+      template?.buttons.forEach(button => {
+        defaults[`button_${button.index}`] = 'abandonedCheckoutUrl';
+      });
+      updated.messages[idx].variable_mapping = defaults;
     }
     setEditingFlow(updated);
   };
