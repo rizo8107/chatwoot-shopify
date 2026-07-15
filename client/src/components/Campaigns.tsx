@@ -64,6 +64,12 @@ const WEBHOOK_FIELDS = [
   { value: 'itemCount', label: 'Item quantity' }
 ];
 
+const WEBHOOK_EVENTS = [
+  { value: 'orders/create', label: 'Order created' },
+  { value: 'orders/paid', label: 'Order paid' },
+  { value: 'fulfillments/create', label: 'Order fulfilled / shipped' }
+];
+
 interface TemplateInfo {
   name: string; language: string; category: string; status: string; paramCount: number; body: string;
 }
@@ -275,6 +281,7 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [wizardStep, setWizardStep] = useState(1);
 
   // Prefill template name + variable slot count from saved Settings
   useEffect(() => {
@@ -361,6 +368,27 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
   const mappingFields = enrollmentSource === 'webhook' ? WEBHOOK_FIELDS.map(field => field.value) : headers;
   const renderPreviewVal = (col: string) => col && previewRow ? (previewRow[col] ?? '') : '—';
 
+  const continueDripSetup = () => {
+    setError('');
+    if (wizardStep === 1 && enrollmentSource === 'csv' && rows.length === 0) {
+      setError('Add a CSV audience before continuing.');
+      return;
+    }
+    if (wizardStep === 2 && !name.trim()) {
+      setError('Enter a campaign name before continuing.');
+      return;
+    }
+    if (wizardStep === 2 && !templateName.trim()) {
+      setError('Choose the first WhatsApp template before continuing.');
+      return;
+    }
+    if (wizardStep === 3 && followUps.some(step => !step.template_name)) {
+      setError('Choose a template for each follow-up before continuing.');
+      return;
+    }
+    setWizardStep(step => Math.min(4, step + 1));
+  };
+
   const submit = async (autostart: boolean) => {
     setError('');
     if (!name.trim()) { setError('Enter a campaign name.'); return; }
@@ -409,8 +437,28 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
         <button className="btn btn-secondary btn-sm" onClick={onCancel}>← Back</button>
       </div>
 
+      {kind === 'drip' && (
+        <nav className="setup-stepper" aria-label="Drip campaign setup">
+          {['Trigger', 'First message', 'Follow-ups', 'Review & launch'].map((label, index) => {
+            const step = index + 1;
+            return (
+              <button
+                key={label}
+                type="button"
+                className={`setup-step${wizardStep === step ? ' active' : ''}${wizardStep > step ? ' complete' : ''}`}
+                onClick={() => step <= wizardStep && setWizardStep(step)}
+                aria-current={wizardStep === step ? 'step' : undefined}
+              >
+                <span>{wizardStep > step ? '✓' : step}</span>
+                <strong>{label}</strong>
+              </button>
+            );
+          })}
+        </nav>
+      )}
+
       {/* Step 1: CSV */}
-      <div className="card mb-4">
+      {(kind !== 'drip' || wizardStep === 1) && <div className="card mb-4 setup-panel">
         <div className="card-header"><div><div className="card-title">1 · {kind === 'drip' ? 'Enrollment trigger' : 'Recipients (CSV)'}</div>{kind === 'drip' && <div className="card-sub">Choose how customers enter this drip campaign.</div>}</div></div>
         {kind === 'drip' && <div className="form-group">
           <label className="form-label">Enrollment source</label>
@@ -453,9 +501,7 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
           <div className="form-group">
             <label className="form-label">Shopify event</label>
             <select className="select" value={triggerEvent} onChange={e => setTriggerEvent(e.target.value)}>
-              <option value="orders/create">Order created</option>
-              <option value="orders/paid">Order paid</option>
-              <option value="fulfillments/create">Order fulfilled / shipped</option>
+              {WEBHOOK_EVENTS.map(event => <option key={event.value} value={event.value}>{event.label}</option>)}
             </select>
           </div>
           <div className="divider" />
@@ -477,10 +523,10 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
             </div>
           ))}
         </>}
-      </div>
+      </div>}
 
       {/* Step 2: Settings */}
-      <div className="card mb-4">
+      {(kind !== 'drip' || wizardStep === 2) && <div className="card mb-4 setup-panel">
         <div className="card-header"><div className="card-title">2 · Campaign settings</div></div>
 
         <div className="form-group">
@@ -498,22 +544,22 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
         </div>
 
         <div className="divider" />
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 20px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: kind === 'drip' ? '1fr' : '1fr 1fr', gap: '0 20px' }}>
           <div className="form-group">
             <label className="form-label">Campaign name</label>
             <input className="input" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Order delay notice — June" />
           </div>
-          <div className="form-group">
+          {kind !== 'drip' && <div className="form-group">
             <label className="form-label">Delay between messages (seconds)</label>
             <input className="input" type="number" min={1} value={delay} onChange={e => setDelay(Math.max(1, parseInt(e.target.value || '1', 10)))} />
             <div className="form-hint">Paces sending to avoid WhatsApp rate limits.</div>
-          </div>
-          <div className="form-group">
+          </div>}
+          {kind !== 'drip' && <div className="form-group">
             <label className="form-label">Template name</label>
             <input className="input" value={templateName} onChange={e => setTemplateName(e.target.value)} placeholder="order_confirmation_01" />
             <div className="form-hint">Prefilled from Settings — editable per campaign.</div>
-          </div>
-          <div className="form-group">
+          </div>}
+          {kind !== 'drip' && <div className="form-group">
             <label className="form-label">Language / Category</label>
             <div style={{ display: 'flex', gap: 6 }}>
               <input className="input" value={language} onChange={e => setLanguage(e.target.value)} placeholder="en" style={{ flex: 1 }} />
@@ -523,12 +569,15 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
                 <option value="AUTHENTICATION">AUTHENTICATION</option>
               </select>
             </div>
-          </div>
+          </div>}
+          {kind === 'drip' && selectedTemplate && (
+            <div className="selected-template-meta">{language} · {category} · {paramMapping.length} variable{paramMapping.length === 1 ? '' : 's'}</div>
+          )}
         </div>
-      </div>
+      </div>}
 
       {/* Step 3: Drip sequence */}
-      {kind === 'drip' && <div className="card mb-4">
+      {kind === 'drip' && wizardStep === 3 && <div className="card mb-4 setup-panel">
         <div className="card-header">
           <div>
             <div className="card-title">3 · Drip sequence</div>
@@ -584,8 +633,15 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
       </div>}
 
       {/* Step 4: Mapping */}
-      <div className="card mb-4">
-        <div className="card-header"><div className="card-title">{kind === 'drip' ? `4 · ${enrollmentSource === 'webhook' ? 'Webhook data mapping' : 'Recipient and Shopify mapping'}` : '3 · Recipient and variable mapping'}</div></div>
+      {(kind !== 'drip' || wizardStep === 4) && <div className="card mb-4 setup-panel">
+        <div className="card-header"><div><div className="card-title">{kind === 'drip' ? '4 · Review data and launch' : '3 · Recipient and variable mapping'}</div>{kind === 'drip' && <div className="card-sub">Confirm how message variables are filled before activating the campaign.</div>}</div></div>
+        {kind === 'drip' && (
+          <div className="review-summary mb-4">
+            <div><span>Enrollment</span><strong>{enrollmentSource === 'webhook' ? WEBHOOK_EVENTS.find(event => event.value === triggerEvent)?.label || triggerEvent : `${rows.length} CSV recipients`}</strong></div>
+            <div><span>Messages</span><strong>{followUps.length + 1}</strong></div>
+            <div><span>First template</span><strong>{templateName}</strong></div>
+          </div>
+        )}
         {enrollmentSource === 'csv' && headers.length === 0 ? (
           <div className="callout info">Add a CSV above to map its columns.</div>
         ) : (
@@ -653,7 +709,7 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
                 {enrollmentSource === 'csv' && <span className="text-dim text-sm" style={{ minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {renderPreviewVal(col)}
                 </span>}
-                <button className="btn btn-ghost btn-sm btn-icon" onClick={() => removeSlot(i)} title="Remove">
+                <button className="btn btn-ghost btn-sm btn-icon" onClick={() => removeSlot(i)} title="Remove" aria-label={`Remove variable ${i + 1}`}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
               </div>
@@ -671,16 +727,38 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
             )}
           </>
         )}
-      </div>
+      </div>}
 
       {error && <div className="callout error mb-3">{error}</div>}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, paddingBottom: 32 }}>
-        <button className="btn btn-secondary" onClick={() => submit(false)} disabled={saving}>Save as draft</button>
-        <button className="btn btn-primary" onClick={() => submit(true)} disabled={saving}>
-          {saving ? <span className="spinner" style={{ width: 14, height: 14 }} /> : null}
-          Create & Start
-        </button>
-      </div>
+      {kind === 'drip' ? (
+        <div className="setup-actions">
+          <button className="btn btn-secondary" onClick={wizardStep === 1 ? onCancel : () => { setError(''); setWizardStep(step => Math.max(1, step - 1)); }}>
+            {wizardStep === 1 ? 'Cancel' : 'Back'}
+          </button>
+          <div className="flex gap-2">
+            {wizardStep === 4 ? <>
+              <button className="btn btn-secondary" onClick={() => submit(false)} disabled={saving}>Save draft</button>
+              <button className="btn btn-primary" onClick={() => submit(true)} disabled={saving}>
+                {saving ? <span className="spinner" style={{ width: 14, height: 14 }} /> : null}
+                Start campaign
+              </button>
+            </> : (
+              <button className="btn btn-primary" onClick={continueDripSetup}>Continue</button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="setup-actions">
+          <span />
+          <div className="flex gap-2">
+            <button className="btn btn-secondary" onClick={() => submit(false)} disabled={saving}>Save as draft</button>
+            <button className="btn btn-primary" onClick={() => submit(true)} disabled={saving}>
+              {saving ? <span className="spinner" style={{ width: 14, height: 14 }} /> : null}
+              Create & Start
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

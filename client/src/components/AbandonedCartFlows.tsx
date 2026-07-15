@@ -222,6 +222,7 @@ export const AbandonedCartFlows: React.FC = () => {
   const [error, setError] = useState('');
   const [editingFlow, setEditingFlow] = useState<Flow | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [editorStep, setEditorStep] = useState(1);
 
   useEffect(() => {
     loadFlows();
@@ -268,6 +269,22 @@ export const AbandonedCartFlows: React.FC = () => {
       updated_at: new Date().toISOString()
     });
     setIsCreating(true);
+    setEditorStep(1);
+    setError('');
+  };
+
+  const continueSetup = () => {
+    if (!editingFlow) return;
+    setError('');
+    if (editorStep === 1 && !editingFlow.name.trim()) {
+      setError('Enter a flow name before continuing.');
+      return;
+    }
+    if (editorStep === 2 && editingFlow.messages.some(message => !message.template_name)) {
+      setError('Choose a WhatsApp template for every message.');
+      return;
+    }
+    setEditorStep(step => Math.min(3, step + 1));
   };
 
   const saveFlow = async () => {
@@ -415,23 +432,32 @@ export const AbandonedCartFlows: React.FC = () => {
         <div className="page-header">
           <div>
             <div className="page-title">{isCreating ? 'Create' : 'Edit'} Recovery Flow</div>
-            <div className="page-sub">Set up automated messages to recover abandoned carts</div>
+            <div className="page-sub">Create a clear message schedule for abandoned checkouts</div>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn btn-secondary" onClick={() => { setEditingFlow(null); setIsCreating(false); }}>
-              Cancel
-            </button>
-            <button className="btn btn-primary" onClick={saveFlow}>
-              Save Flow
-            </button>
-          </div>
+          <button className="btn btn-secondary btn-sm" onClick={() => { setEditingFlow(null); setIsCreating(false); setError(''); }}>Exit setup</button>
         </div>
 
-        {error && <div className="card"><div className="callout error">{error}</div></div>}
+        <nav className="setup-stepper recovery-stepper" aria-label="Recovery flow setup">
+          {['Flow details', 'Message schedule', 'Review'].map((label, index) => {
+            const step = index + 1;
+            return (
+              <button
+                key={label}
+                type="button"
+                className={`setup-step${editorStep === step ? ' active' : ''}${editorStep > step ? ' complete' : ''}`}
+                onClick={() => step <= editorStep && setEditorStep(step)}
+                aria-current={editorStep === step ? 'step' : undefined}
+              >
+                <span>{editorStep > step ? '✓' : step}</span>
+                <strong>{label}</strong>
+              </button>
+            );
+          })}
+        </nav>
 
         {/* Basic Info */}
-        <div className="card mb-4">
-          <div className="card-header"><div className="card-title">Basic Info</div></div>
+        {editorStep === 1 && <div className="card mb-4 setup-panel">
+          <div className="card-header"><div><div className="card-title">Flow details</div><div className="card-sub">Name this recovery journey and choose whether it should enroll new carts.</div></div></div>
           <div className="form-group">
             <label className="form-label">Flow Name</label>
             <input
@@ -460,10 +486,10 @@ export const AbandonedCartFlows: React.FC = () => {
               <span>Active (automatically triggers for new abandoned carts)</span>
             </label>
           </div>
-        </div>
+        </div>}
 
         {/* Messages */}
-        <div className="card">
+        {editorStep === 2 && <div className="card setup-panel">
           <div className="card-header">
             <div>
               <div className="card-title">Follow-up Messages</div>
@@ -476,22 +502,13 @@ export const AbandonedCartFlows: React.FC = () => {
             )}
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <div className="message-schedule">
             {editingFlow.messages.map((msg, idx) => {
               const tpl = templates.find(t => t.name === msg.template_name);
               const mapping = msg.variable_mapping || {};
 
               return (
-                <div
-                  key={msg.id}
-                  style={{
-                    padding: '16px 16px 14px',
-                    background: 'var(--bg-subtle)',
-                    borderRadius: 8,
-                    borderLeft: '3px solid var(--primary)',
-                    position: 'relative'
-                  }}
-                >
+                <div key={msg.id} className="message-step-card">
                   {/* Header row: step badge + delete */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                     <div style={{
@@ -532,42 +549,32 @@ export const AbandonedCartFlows: React.FC = () => {
                     </div>
 
                     <div className="form-group" style={{ marginBottom: 0 }}>
-                      <label className="form-label" style={{ fontSize: 12 }}>Send After</label>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <input
-                          type="number"
-                          min={0}
-                          className="input"
-                          value={msg.delay_minutes}
-                          onChange={e => updateMessage(idx, 'delay_minutes', parseInt(e.target.value) || 0)}
-                          placeholder="0"
-                          style={{ flex: 1 }}
-                        />
-                        <select
-                          className="select"
-                          style={{ flex: 1 }}
-                          onChange={e => updateMessage(idx, 'delay_minutes', parseInt(e.target.value))}
-                          value={msg.delay_minutes}
-                        >
-                          <option value="0">Immediately</option>
-                          <option value="30">30 minutes</option>
-                          <option value="60">1 hour</option>
-                          <option value="360">6 hours</option>
-                          <option value="1440">1 day</option>
-                          <option value="2880">2 days</option>
-                          <option value="4320">3 days</option>
-                        </select>
-                      </div>
+                      <label className="form-label" style={{ fontSize: 12 }}>Delay after cart abandonment</label>
+                      <input
+                        type="number"
+                        min={0}
+                        className="input"
+                        value={msg.delay_minutes}
+                        onChange={e => updateMessage(idx, 'delay_minutes', parseInt(e.target.value) || 0)}
+                        placeholder="0"
+                      />
+                      <div className="form-hint">Minutes · {formatDelay(msg.delay_minutes)}</div>
                     </div>
                   </div>
 
                   {/* Variable mapper (shown only when template has variables/buttons) */}
                   {tpl && (tpl.variables.length > 0 || tpl.buttons.length > 0) && (
-                    <VariableMapper
-                      template={tpl}
-                      mapping={mapping}
-                      onChange={m => updateMapping(idx, m)}
-                    />
+                    <details className="mapping-disclosure">
+                      <summary>
+                        <span>Variables and button links</span>
+                        <small>{tpl.variables.length + tpl.buttons.length} field{tpl.variables.length + tpl.buttons.length === 1 ? '' : 's'} to map</small>
+                      </summary>
+                      <VariableMapper
+                        template={tpl}
+                        mapping={mapping}
+                        onChange={m => updateMapping(idx, m)}
+                      />
+                    </details>
                   )}
 
                   {/* Template selected but no variables */}
@@ -583,6 +590,35 @@ export const AbandonedCartFlows: React.FC = () => {
               );
             })}
           </div>
+        </div>}
+
+        {editorStep === 3 && (
+          <div className="card setup-panel">
+            <div className="card-header"><div><div className="card-title">Review recovery flow</div><div className="card-sub">Check the schedule before saving. No messages are sent from this screen.</div></div></div>
+            <div className="review-summary">
+              <div><span>Flow</span><strong>{editingFlow.name}</strong></div>
+              <div><span>Status</span><strong>{editingFlow.is_active ? 'Active for new carts' : 'Saved inactive'}</strong></div>
+              <div><span>Messages</span><strong>{editingFlow.messages.length}</strong></div>
+            </div>
+            <div className="review-timeline">
+              {editingFlow.messages.map((message, index) => (
+                <div key={message.id} className="review-step">
+                  <span>{index + 1}</span>
+                  <div><strong>{message.template_name || 'Template not selected'}</strong><small>{formatDelay(message.delay_minutes)} after abandonment</small></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {error && <div className="callout error mt-3">{error}</div>}
+        <div className="setup-actions">
+          <button className="btn btn-secondary" onClick={editorStep === 1 ? () => { setEditingFlow(null); setIsCreating(false); setError(''); } : () => { setError(''); setEditorStep(step => Math.max(1, step - 1)); }}>
+            {editorStep === 1 ? 'Cancel' : 'Back'}
+          </button>
+          {editorStep === 3
+            ? <button className="btn btn-primary" onClick={saveFlow}>Save flow</button>
+            : <button className="btn btn-primary" onClick={continueSetup}>Continue</button>}
         </div>
       </div>
     );
@@ -658,7 +694,7 @@ export const AbandonedCartFlows: React.FC = () => {
                         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                           <button
                             className="btn btn-xs btn-secondary"
-                            onClick={() => setEditingFlow(flow)}
+                            onClick={() => { setEditingFlow(flow); setIsCreating(false); setEditorStep(1); setError(''); }}
                           >
                             Edit
                           </button>

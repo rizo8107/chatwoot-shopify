@@ -679,6 +679,79 @@ td { padding: 9px; }
 .webhook-url-box { min-height: 34px; padding: 5px 7px; background: #f8f9fa; }
 .webhook-url-text { font-size: 9px; }
 
+/* Guided workflow setup */
+.setup-stepper {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+.recovery-stepper { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.setup-step {
+  min-width: 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  text-align: left;
+}
+.setup-step > span {
+  width: 21px;
+  height: 21px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 21px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--text-muted);
+  font-size: 8.5px;
+  font-weight: 700;
+}
+.setup-step strong { overflow: hidden; font-size: 9.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.setup-step.active { background: #f1f2f4; color: var(--text); }
+.setup-step.active > span { border-color: #20242b; background: #20242b; color: #fff; }
+.setup-step.complete { color: var(--text-muted); cursor: pointer; }
+.setup-step.complete > span { border-color: #b8ddc3; background: #edf8f0; color: var(--green); }
+.setup-panel { max-width: 920px; margin-right: auto; margin-left: auto; }
+.setup-actions {
+  max-width: 920px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px auto 0;
+  padding: 12px 0 28px;
+  border-top: 1px solid var(--border);
+}
+.selected-template-meta { margin-top: -6px; color: var(--text-dim); font-size: 9px; }
+.message-schedule { display: grid; gap: 12px; }
+.message-step-card { position: relative; padding: 14px; border: 1px solid var(--border); border-radius: 7px; background: #fbfbfc; }
+.mapping-disclosure { margin-top: 10px; border-top: 1px solid var(--border); }
+.mapping-disclosure > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 2px 0; color: var(--text-muted); font-size: 10px; font-weight: 600; cursor: pointer; }
+.mapping-disclosure > summary small { color: var(--text-dim); font-size: 8.5px; font-weight: 500; }
+.review-summary { display: grid; grid-template-columns: 2fr 1fr 1fr; border: 1px solid var(--border); border-radius: 7px; }
+.review-summary > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; padding: 12px; }
+.review-summary > div + div { border-left: 1px solid var(--border); }
+.review-summary span { color: var(--text-dim); font-size: 8.5px; text-transform: uppercase; }
+.review-summary strong { overflow: hidden; color: var(--text); font-size: 10.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.review-timeline { display: grid; gap: 0; margin-top: 14px; }
+.review-step { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.review-step:last-child { border-bottom: 0; }
+.review-step > span { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 22px; border-radius: 50%; background: #20242b; color: #fff; font-size: 8.5px; font-weight: 700; }
+.review-step > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.review-step strong { overflow: hidden; font-size: 10.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.review-step small { color: var(--text-dim); font-size: 8.5px; }
+
 @media (max-width: 1050px) {
   :root { --sidebar-w: 178px; }
   .page { padding: 18px; }
@@ -695,4 +768,10 @@ td { padding: 9px; }
   .page { padding: 18px 14px 32px; }
   .page > .card, .page > .metrics-row, .page > .flex, .page > .dashboard-content-grid { width: calc(100vw - 28px); max-width: calc(100vw - 28px); }
   .dashboard-side-stack { grid-template-columns: 1fr; }
+  .setup-stepper { grid-template-columns: 1fr 1fr; }
+  .recovery-stepper { grid-template-columns: 1fr; }
+  .setup-step { min-height: 36px; }
+  .review-summary { grid-template-columns: 1fr; }
+  .review-summary > div + div { border-top: 1px solid var(--border); border-left: 0; }
+  .message-step-card > div[style*="grid-template-columns"] { grid-template-columns: 1fr !important; }
 }
