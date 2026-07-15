@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Login } from './components/Login';
 import { Dashboard } from './components/Dashboard';
 import { FlowBuilder } from './components/FlowBuilder';
@@ -6,17 +6,19 @@ import { Logs } from './components/Logs';
 import { Settings } from './components/Settings';
 import { TestConsole } from './components/TestConsole';
 import { Campaigns } from './components/Campaigns';
+import { DripCampaigns } from './components/DripCampaigns';
 import { Contacts } from './components/Contacts';
 import { AbandonedCarts } from './components/AbandonedCarts';
 import { AbandonedCartFlows } from './components/AbandonedCartFlows';
 
-type Tab = 'dashboard' | 'flows' | 'campaigns' | 'contacts' | 'abandoned-carts' | 'abandoned-cart-flows' | 'logs' | 'settings' | 'test';
+type Tab = 'dashboard' | 'flows' | 'campaigns' | 'drip-campaigns' | 'contacts' | 'abandoned-carts' | 'abandoned-cart-flows' | 'logs' | 'settings' | 'test';
 type NavSection = 'Workspace' | 'Recovery' | 'System';
 
 const ICONS: Record<Tab, React.ReactNode> = {
   dashboard: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="4" rx="1"/><rect x="14" y="11" width="7" height="10" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></>,
   flows: <><circle cx="5" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="18" r="2"/><path d="M6.5 7.5 10.5 11M13.5 13.5l4 3"/></>,
   campaigns: <><path d="M3 11l18-5v12L3 14v-3z"/><path d="M8 15.3V19a2 2 0 0 0 2 2h1"/></>,
+  'drip-campaigns': <><path d="M5 4h14M5 12h14M5 20h14"/><circle cx="8" cy="4" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="20" r="2"/></>,
   contacts: <><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M16 5a4 4 0 0 1 0 7M19 15a6 6 0 0 1 3 6"/></>,
   'abandoned-carts': <><circle cx="9" cy="20" r="1"/><circle cx="19" cy="20" r="1"/><path d="M3 4h2l2.4 10.4A2 2 0 0 0 9.3 16H18a2 2 0 0 0 1.9-1.4L22 7H6"/></>,
   'abandoned-cart-flows': <><path d="M20 7h-6V1"/><path d="M4 17h6v6"/><path d="M5.1 9A8 8 0 0 1 19 5l1 2M4 17l1 2a8 8 0 0 0 13.9-4"/></>,
@@ -29,6 +31,7 @@ const NAV: { id: Tab; label: string; section: NavSection }[] = [
   { id: 'dashboard', label: 'Overview', section: 'Workspace' },
   { id: 'flows', label: 'Automations', section: 'Workspace' },
   { id: 'campaigns', label: 'Campaigns', section: 'Workspace' },
+  { id: 'drip-campaigns', label: 'Drip campaigns', section: 'Workspace' },
   { id: 'contacts', label: 'Contacts', section: 'Workspace' },
   { id: 'abandoned-carts', label: 'Abandoned carts', section: 'Recovery' },
   { id: 'abandoned-cart-flows', label: 'Recovery flows', section: 'Recovery' },
@@ -51,6 +54,28 @@ function AppShell({ tab, setTab, authRequired, logout, children }: {
   children: React.ReactNode;
 }) {
   const current = NAV.find(item => item.id === tab);
+  const [search, setSearch] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, []);
+
+  const openSearchResult = () => {
+    const result = NAV.find(item => item.label.toLowerCase().includes(search.trim().toLowerCase()));
+    if (result) {
+      setTab(result.id);
+      setSearch('');
+      searchRef.current?.blur();
+    }
+  };
 
   return (
     <div className="app">
@@ -101,11 +126,27 @@ function AppShell({ tab, setTab, authRequired, logout, children }: {
 
       <section className="workspace">
         <header className="workspace-header">
-          <div>
+          <div className="workspace-context">
             <div className="workspace-eyebrow">Stomatal Farms / {current?.section}</div>
             <div className="workspace-title">{current?.label}</div>
           </div>
+          <label className="workspace-command">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input
+              ref={searchRef}
+              aria-label="Search workspace"
+              placeholder="Search workspace..."
+              value={search}
+              onChange={event => setSearch(event.target.value)}
+              onKeyDown={event => event.key === 'Enter' && openSearchResult()}
+            />
+            <kbd>Ctrl K</kbd>
+          </label>
           <div className="workspace-actions">
+            <button className="header-action" onClick={() => setTab('test')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m5 3 14 9-14 9V3z"/></svg>
+              Run test
+            </button>
             <span className="environment-pill"><span /> Live</span>
             <div className="header-avatar">SF</div>
           </div>
@@ -137,6 +178,7 @@ const App: React.FC = () => {
       case 'dashboard': return <Dashboard onNavigate={setTab} />;
       case 'flows': return <FlowBuilder />;
       case 'campaigns': return <Campaigns />;
+      case 'drip-campaigns': return <DripCampaigns />;
       case 'contacts': return <Contacts />;
       case 'abandoned-carts': return <AbandonedCarts />;
       case 'abandoned-cart-flows': return <AbandonedCartFlows />;

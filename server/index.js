@@ -66,6 +66,7 @@ import {
 
 import { startScheduler } from './scheduler.js';
 import { scheduleRecoveryForCart, cancelRecoveryForOrder } from './recovery.js';
+import { enrollWebhookDripCampaigns } from './campaigns.js';
 
 dotenv.config();
 
@@ -77,6 +78,8 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 3000;
+let backendReady = false;
+let backendInitError = null;
 
 // ─── Auth gate ──────────────────────────────────────────────────────────────
 // Protects all /api routes except: auth endpoints, the Shopify webhook, and the
@@ -86,7 +89,7 @@ const PORT = process.env.PORT || 3000;
 const PUBLIC_API = new Set([
   '/api/auth/login', '/api/auth/logout', '/api/auth/me',
   '/api/auth/forgot-password', '/api/auth/reset-password',
-  '/api/webhook/shopify', '/api/shopify/auth/callback', '/api/webhook/chatwoot'
+  '/api/webhook/shopify', '/api/shopify/auth/callback', '/api/webhook/chatwoot', '/api/health'
 ]);
 
 app.use((req, res, next) => {
@@ -138,6 +141,26 @@ app.post('/api/auth/reset-password', async (req, res) => {
     if (!result.ok) return res.status(400).json({ error: result.message });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/health', (_req, res) => {
+  res.status(backendReady ? 200 : 503).json({
+    status: backendReady ? 'ready' : 'starting',
+    database: backendReady ? 'connected' : 'initializing',
+    error: backendInitError
+  });
+});
+
+// The HTTP server starts before cloud database initialization completes. API
+// callers now receive a useful JSON 503 during that short window instead of
+// Vite reporting a 502 because nothing is listening on port 3000.
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api') || backendReady) return next();
+  return res.status(503).json({
+    error: backendInitError
+      ? `Backend initialization failed; retrying: ${backendInitError}`
+      : 'Backend is starting; database initialization is still in progress'
+  });
 });
 
 function genId(prefix = 'tx') {
@@ -749,6 +772,26 @@ app.post('/api/webhook/shopify', async (req, res) => {
   // delay and variable mapping configured in Recovery Flows.
   if (topic.startsWith('checkouts/')) return;
 
+  // Active webhook-based drip campaigns enroll the customer once when their
+  // configured Shopify event and conditions match. Enrollment is persisted
+  // before the ordinary flow engine runs; the campaign scheduler handles all
+  // subsequent delays and sends.
+  try {
+    const enrollments = await enrollWebhookDripCampaigns(topic, {
+      ...details,
+      orderId: rawBody?.id || rawBody?.order_id,
+      financialStatus: rawBody?.financial_status || rawBody?.display_financial_status || '',
+      fulfillmentStatus: rawBody?.fulfillment_status || rawBody?.display_fulfillment_status || '',
+      tags: rawBody?.tags || rawBody?.customer?.tags || '',
+      currency: rawBody?.currency || '',
+      itemCount: Array.isArray(rawBody?.line_items) ? rawBody.line_items.reduce((sum, item) => sum + Number(item.quantity || 0), 0) : 0
+    });
+    const enrolledCount = enrollments.filter(result => result.enrolled).length;
+    if (enrolledCount > 0) console.log(`[Drip] Enrolled order ${details.orderNumber || rawBody?.id} into ${enrolledCount} campaign(s)`);
+  } catch (err) {
+    console.error('[Drip] Webhook enrollment failed:', err.message);
+  }
+
   // Find matching active flows
   const matchingFlows = await getFlowsByTrigger(topic).catch(() => []);
 
@@ -970,26 +1013,79 @@ app.get('/api/campaigns/:id', async (req, res) => {
 
 app.post('/api/campaigns', async (req, res) => {
   try {
-    const { name, delay_seconds, template_name, language, category, phone_column, name_column, param_mapping, rows, autostart } = req.body;
+    const {
+      name, delay_seconds, template_name, language, category, phone_column, name_column,
+      param_mapping, steps, shopify_check_mode, order_column, email_column, campaign_type,
+      enrollment_source, trigger_event, trigger_conditions, rows, autostart
+    } = req.body;
 
     if (!name) return res.status(400).json({ error: 'Campaign name is required' });
-    if (!phone_column) return res.status(400).json({ error: 'A phone column must be selected' });
-    if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'No recipients found in the CSV' });
+    const source = campaign_type === 'drip' && enrollment_source === 'webhook' ? 'webhook' : 'csv';
+    if (source === 'csv' && !phone_column) return res.status(400).json({ error: 'A phone column must be selected' });
+    if (source === 'csv' && (!Array.isArray(rows) || rows.length === 0)) return res.status(400).json({ error: 'No recipients found in the CSV' });
+    const allowedTriggers = ['orders/create', 'orders/paid', 'fulfillments/create'];
+    if (source === 'webhook' && !allowedTriggers.includes(trigger_event)) {
+      return res.status(400).json({ error: 'Select a supported Shopify webhook trigger' });
+    }
+    const allowedConditionFields = ['firstName', 'fullName', 'phone', 'email', 'orderNumber', 'orderName', 'totalPrice', 'itemsSummary', 'financialStatus', 'fulfillmentStatus', 'shippingCity', 'tags', 'currency', 'itemCount'];
+    const allowedConditionOperators = ['exists', 'not_exists', 'equals', 'not_equals', 'contains', 'greater_than', 'less_than'];
+    const normalizedConditions = source === 'webhook' && Array.isArray(trigger_conditions)
+      ? trigger_conditions.slice(0, 10).filter(condition => allowedConditionFields.includes(condition?.field) && allowedConditionOperators.includes(condition?.operator)).map(condition => ({
+          field: condition.field,
+          operator: condition.operator,
+          value: String(condition.value ?? '').slice(0, 500)
+        }))
+      : [];
 
     const settings = await getAllSettings();
-    const tmplName = template_name || settings.WHATSAPP_TEMPLATE_NAME || '';
+    const tmplName = template_name || steps?.[0]?.template_name || settings.WHATSAPP_TEMPLATE_NAME || '';
     if (!tmplName) return res.status(400).json({ error: 'No WhatsApp template name — set one in Settings or the campaign form' });
 
     const mapping = Array.isArray(param_mapping) ? param_mapping : [];
-    const recipients = rows.map((row, i) => {
+    const normalizedSteps = Array.isArray(steps) && steps.length > 0
+      ? steps.slice(0, 10).map((step, index) => ({
+          id: String(step.id || `step_${index + 1}`),
+          template_name: String(step.template_name || '').trim(),
+          language: String(step.language || 'en'),
+          category: String(step.category || 'MARKETING').toUpperCase(),
+          delay_value: Math.max(0, Number(step.delay_value || 0)),
+          delay_unit: ['minutes', 'hours', 'days'].includes(step.delay_unit) ? step.delay_unit : 'hours',
+          param_mapping: Array.isArray(step.param_mapping) ? step.param_mapping : []
+        }))
+      : [{
+          id: 'step_1', template_name: tmplName, language: language || 'en',
+          category: category || 'UTILITY', delay_value: 0, delay_unit: 'minutes',
+          param_mapping: mapping
+        }];
+    if (normalizedSteps.some(step => !step.template_name)) {
+      return res.status(400).json({ error: 'Every drip step must have a WhatsApp template' });
+    }
+    const checkMode = source === 'webhook'
+      ? 'off'
+      : ['off', 'stop_if_order_found', 'stop_if_paid_or_fulfilled'].includes(shopify_check_mode)
+      ? shopify_check_mode
+      : 'off';
+    if (checkMode !== 'off' && !order_column && !email_column) {
+      return res.status(400).json({ error: 'Shopify cross-check requires an order number or email column' });
+    }
+    const safeRows = source === 'csv' && Array.isArray(rows) ? rows : [];
+    const recipients = safeRows.map((row, i) => {
       const { formattedPhone } = normalizePhone(row[phone_column], '');
       const variables = {};
       mapping.forEach((col, idx) => { variables[String(idx + 1)] = col ? String(row[col] ?? '') : ''; });
+      const step_variables = normalizedSteps.map(step => {
+        const values = {};
+        step.param_mapping.forEach((col, idx) => { values[String(idx + 1)] = col ? String(row[col] ?? '') : ''; });
+        return values;
+      });
       return {
         row_index: i,
         phone: formattedPhone,
         name: name_column ? String(row[name_column] ?? '') : '',
-        variables
+        email: email_column ? String(row[email_column] ?? '') : '',
+        order_reference: order_column ? String(row[order_column] ?? '') : '',
+        variables,
+        step_variables
       };
     });
 
@@ -1000,7 +1096,13 @@ app.post('/api/campaigns', async (req, res) => {
       language: language || 'en',
       category: category || 'UTILITY',
       delay_seconds: parseInt(delay_seconds || 5, 10),
-      phone_column, name_column, param_mapping: mapping, recipients
+      phone_column, name_column, param_mapping: mapping,
+      steps: normalizedSteps, shopify_check_mode: checkMode,
+      order_column: order_column || '', email_column: email_column || '',
+      campaign_type: campaign_type === 'drip' ? 'drip' : 'bulk', recipients,
+      enrollment_source: source,
+      trigger_event: source === 'webhook' ? trigger_event : null,
+      trigger_conditions: normalizedConditions
     });
 
     if (autostart) await startCampaign(id);
@@ -1046,15 +1148,22 @@ app.get('*', (req, res, next) => {
 
 // ─── Start ────────────────────────────────────────────────────────────────
 
-async function start() {
+async function initializeBackend() {
   try {
     await initDb();
+    backendReady = true;
+    backendInitError = null;
     startScheduler();
-    app.listen(PORT, () => console.log(`[Server] Listening on port ${PORT}`));
+    console.log('[Server] Backend ready');
   } catch (err) {
-    console.error('[Server] Failed to start:', err);
-    process.exit(1);
+    backendReady = false;
+    backendInitError = err.message;
+    console.error('[Server] Initialization failed; retrying in 5s:', err.message);
+    setTimeout(initializeBackend, 5000);
   }
 }
 
-start();
+app.listen(PORT, () => {
+  console.log(`[Server] Listening on port ${PORT}; initializing backend`);
+  initializeBackend();
+});

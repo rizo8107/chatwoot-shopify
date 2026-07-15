@@ -2,28 +2,74 @@ import React, { useEffect, useState } from 'react';
 
 const API = '/api';
 
+async function readApiResponse(response: Response) {
+  const text = await response.text();
+  let data: any = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
+  if (!response.ok) {
+    const fallback = response.status === 502 || response.status === 503
+      ? 'Backend is starting or unavailable. Run npm run dev from the project root, then retry.'
+      : `Request failed (${response.status})`;
+    throw new Error(data.error || fallback);
+  }
+  return data;
+}
+
 interface CampaignSummary {
   id: string; name: string; template_name: string; status: string;
-  delay_seconds: number; total: number; sent: number; failed: number;
+  delay_seconds: number; total: number; sent: number; failed: number; skipped: number;
+  steps: DripStep[]; shopify_check_mode: string; campaign_type: CampaignKind;
+  enrollment_source: 'csv' | 'webhook'; trigger_event?: string; trigger_conditions?: TriggerCondition[];
   created_at: string; started_at?: string;
+}
+
+interface DripStep {
+  id: string; template_name: string; language: string; category: string;
+  delay_value: number; delay_unit: 'minutes' | 'hours' | 'days'; param_mapping: string[];
 }
 
 interface Recipient {
   id: string; row_index: number; phone: string; name: string;
   variables: Record<string, string>; status: string; error_message?: string;
+  current_step: number; last_shopify_status?: string; order_reference?: string; email?: string;
   run_at?: string; sent_at?: string;
 }
 
 interface CampaignDetail extends CampaignSummary {
   language: string; category: string; phone_column: string; name_column: string;
-  param_mapping: string[]; recipients: Recipient[];
+  param_mapping: string[]; recipients: Recipient[]; logs: CampaignLog[];
 }
+
+interface CampaignLog {
+  id: string; recipient_id: string; step_index: number; template_name: string;
+  status: string; shopify_status?: string; error_message?: string; created_at: string;
+}
+
+interface TriggerCondition { field: string; operator: string; value: string; }
+
+const WEBHOOK_FIELDS = [
+  { value: 'firstName', label: 'Customer first name' },
+  { value: 'fullName', label: 'Customer full name' },
+  { value: 'phone', label: 'Customer phone' },
+  { value: 'email', label: 'Customer email' },
+  { value: 'orderNumber', label: 'Order number' },
+  { value: 'orderName', label: 'Order name' },
+  { value: 'totalPrice', label: 'Order total' },
+  { value: 'itemsSummary', label: 'Items summary' },
+  { value: 'financialStatus', label: 'Financial status' },
+  { value: 'fulfillmentStatus', label: 'Fulfillment status' },
+  { value: 'shippingCity', label: 'Shipping city' },
+  { value: 'tags', label: 'Order/customer tags' },
+  { value: 'currency', label: 'Currency' },
+  { value: 'itemCount', label: 'Item quantity' }
+];
 
 interface TemplateInfo {
   name: string; language: string; category: string; status: string; paramCount: number; body: string;
 }
 
 type View = { kind: 'list' } | { kind: 'new' } | { kind: 'detail'; id: string };
+export type CampaignKind = 'bulk' | 'drip';
 
 // ─── CSV parsing ────────────────────────────────────────────────────────────
 
@@ -65,30 +111,43 @@ function parseCSV(text: string): { headers: string[]; rows: Record<string, strin
 function statusBadge(s: string) {
   const cls: Record<string, string> = {
     completed: 'success', sent: 'success', running: 'processing',
-    pending: 'pending', paused: 'delayed', draft: 'pending', failed: 'failed'
+    pending: 'pending', paused: 'delayed', draft: 'pending', failed: 'failed', skipped: 'delayed',
+    enrolled: 'success', filtered: 'delayed'
   };
   return <span className={`badge ${cls[s] || 'pending'}`}><span className="badge-dot" />{s}</span>;
 }
 
 // ─── List view ──────────────────────────────────────────────────────────────
 
-function CampaignList({ onNew, onOpen }: { onNew: () => void; onOpen: (id: string) => void }) {
+function CampaignList({ kind, onNew, onOpen }: { kind: CampaignKind; onNew: () => void; onOpen: (id: string) => void }) {
   const [campaigns, setCampaigns] = useState<CampaignSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   const load = async () => {
     try {
-      const data = await fetch(`${API}/campaigns`).then(r => r.json());
-      setCampaigns(Array.isArray(data) ? data : []);
-    } catch (_) { /* ignore */ }
-    setLoading(false);
+      const data = await fetch(`${API}/campaigns`).then(readApiResponse);
+      setCampaigns(Array.isArray(data) ? data.filter((c: CampaignSummary) => (c.campaign_type || 'bulk') === kind) : []);
+      setLoadError('');
+      setLoading(false);
+      return true;
+    } catch (err: any) {
+      setLoadError(err.message || 'Could not connect to the backend');
+      setLoading(false);
+      return false;
+    }
   };
 
   useEffect(() => {
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      const ok = await load();
+      if (!cancelled && ok) timer = setTimeout(poll, 5000);
+    };
+    poll();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [kind]);
 
   const act = async (id: string, action: 'start' | 'pause') => {
     await fetch(`${API}/campaigns/${id}/${action}`, { method: 'POST' });
@@ -105,14 +164,16 @@ function CampaignList({ onNew, onOpen }: { onNew: () => void; onOpen: (id: strin
     <div className="page">
       <div className="page-header">
         <div>
-          <div className="page-title">Campaigns</div>
-          <div className="page-sub">Bulk-send WhatsApp templates from a CSV with column → variable mapping</div>
+          <div className="page-title">{kind === 'drip' ? 'Drip Campaigns' : 'Campaigns'}</div>
+          <div className="page-sub">{kind === 'drip' ? 'Build timed WhatsApp sequences with Shopify safeguards and step-level logs' : 'Send one WhatsApp template to a CSV audience'}</div>
         </div>
         <button className="btn btn-primary" onClick={onNew}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          New Campaign
+          New {kind === 'drip' ? 'Drip Campaign' : 'Campaign'}
         </button>
       </div>
+
+      {loadError && <div className="callout error mb-3"><span>{loadError}</span><button className="btn btn-secondary btn-sm" onClick={() => { setLoading(true); load(); }}>Retry</button></div>}
 
       <div className="card" style={{ padding: 0 }}>
         {loading ? (
@@ -120,8 +181,8 @@ function CampaignList({ onNew, onOpen }: { onNew: () => void; onOpen: (id: strin
         ) : campaigns.length === 0 ? (
           <div className="empty-state">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>
-            <h3>No campaigns yet</h3>
-            <p>Create one to bulk-send templates from a CSV.</p>
+            <h3>No {kind === 'drip' ? 'drip campaigns' : 'campaigns'} yet</h3>
+            <p>{kind === 'drip' ? 'Create a timed sequence from a CSV audience.' : 'Create a one-message campaign from a CSV audience.'}</p>
           </div>
         ) : (
           <div className="table-wrap">
@@ -129,21 +190,21 @@ function CampaignList({ onNew, onOpen }: { onNew: () => void; onOpen: (id: strin
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Template</th>
+                  <th>{kind === 'drip' ? 'Sequence' : 'Template'}</th>
                   <th>Status</th>
                   <th>Progress</th>
-                  <th>Delay</th>
+                  <th>Pacing</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
                 {campaigns.map(c => {
-                  const done = c.sent + c.failed;
+                  const done = c.sent + c.failed + (c.skipped || 0);
                   const pct = c.total ? Math.round((done / c.total) * 100) : 0;
                   return (
                     <tr key={c.id} style={{ cursor: 'pointer' }}>
                       <td onClick={() => onOpen(c.id)} style={{ fontWeight: 600 }}>{c.name}</td>
-                      <td onClick={() => onOpen(c.id)} className="mono text-sm">{c.template_name}</td>
+                      <td onClick={() => onOpen(c.id)} className="text-sm">{kind === 'drip' ? <>{c.steps?.length || 1} steps<div className="text-dim">{c.enrollment_source === 'webhook' ? c.trigger_event : 'CSV enrollment'}</div></> : <span className="mono">{c.template_name}</span>}</td>
                       <td onClick={() => onOpen(c.id)}>{statusBadge(c.status)}</td>
                       <td onClick={() => onOpen(c.id)} style={{ minWidth: 160 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -151,7 +212,7 @@ function CampaignList({ onNew, onOpen }: { onNew: () => void; onOpen: (id: strin
                             <div style={{ width: `${pct}%`, height: '100%', background: 'var(--green)' }} />
                           </div>
                           <span className="text-dim text-sm" style={{ whiteSpace: 'nowrap' }}>
-                            {c.sent}✓ {c.failed > 0 ? `${c.failed}✗ ` : ''}/ {c.total}
+                            {c.sent} sent {c.skipped > 0 ? `· ${c.skipped} stopped ` : ''}{c.failed > 0 ? `· ${c.failed} failed ` : ''}/ {c.total}
                           </span>
                         </div>
                       </td>
@@ -185,7 +246,7 @@ function CampaignList({ onNew, onOpen }: { onNew: () => void; onOpen: (id: strin
 
 // ─── New campaign wizard ────────────────────────────────────────────────────
 
-function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated: () => void }) {
+function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCancel: () => void; onCreated: () => void }) {
   const [csvText, setCsvText] = useState('');
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
@@ -200,6 +261,13 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
   const [phoneCol, setPhoneCol] = useState('');
   const [nameCol, setNameCol] = useState('');
   const [paramMapping, setParamMapping] = useState<string[]>(['', '']);
+  const [followUps, setFollowUps] = useState<DripStep[]>([]);
+  const [enrollmentSource, setEnrollmentSource] = useState<'csv' | 'webhook'>(kind === 'drip' ? 'webhook' : 'csv');
+  const [triggerEvent, setTriggerEvent] = useState('orders/create');
+  const [triggerConditions, setTriggerConditions] = useState<TriggerCondition[]>([]);
+  const [shopifyCheckMode, setShopifyCheckMode] = useState(kind === 'drip' ? 'stop_if_paid_or_fulfilled' : 'off');
+  const [orderCol, setOrderCol] = useState('');
+  const [emailCol, setEmailCol] = useState('');
 
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [templatesMsg, setTemplatesMsg] = useState('');
@@ -210,7 +278,7 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
 
   // Prefill template name + variable slot count from saved Settings
   useEffect(() => {
-    fetch(`${API}/settings`).then(r => r.json()).then(d => {
+    fetch(`${API}/settings`).then(readApiResponse).then(d => {
       if (d.WHATSAPP_TEMPLATE_NAME) setTemplateName(d.WHATSAPP_TEMPLATE_NAME);
       const savedMapping = (d.WHATSAPP_TEMPLATE_MAPPING || '').split(',').map((s: string) => s.trim()).filter(Boolean);
       if (savedMapping.length > 0) setParamMapping(new Array(savedMapping.length).fill(''));
@@ -220,9 +288,7 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
   // Load the live template list from Chatwoot
   useEffect(() => {
     setTemplatesMsg('Loading templates…');
-    fetch(`${API}/whatsapp/templates`).then(async r => {
-      const d = await r.json();
-      if (!r.ok) { setTemplatesMsg(d.error || 'Could not load templates'); return; }
+    fetch(`${API}/whatsapp/templates`).then(readApiResponse).then(d => {
       setTemplates(Array.isArray(d) ? d : []);
       setTemplatesMsg(Array.isArray(d) && d.length ? '' : 'No templates found on the Chatwoot inbox.');
     }).catch(err => setTemplatesMsg(err.message));
@@ -251,8 +317,12 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
     const lower = headers.map(h => h.toLowerCase());
     const phoneGuess = headers[lower.findIndex(h => h.includes('phone') || h.includes('mobile') || h.includes('number'))];
     const nameGuess = headers[lower.findIndex(h => h.includes('name'))];
+    const orderGuess = headers[lower.findIndex(h => h.includes('order'))];
+    const emailGuess = headers[lower.findIndex(h => h.includes('email'))];
     if (phoneGuess) setPhoneCol(phoneGuess);
     if (nameGuess) setNameCol(nameGuess);
+    if (orderGuess) setOrderCol(orderGuess);
+    if (emailGuess) setEmailCol(emailGuess);
   };
 
   const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -267,15 +337,38 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
   const addSlot = () => setParamMapping(m => [...m, '']);
   const removeSlot = (i: number) => setParamMapping(m => m.filter((_, idx) => idx !== i));
 
+  const addFollowUp = () => setFollowUps(current => [...current, {
+    id: `step_${current.length + 2}`,
+    template_name: '', language: 'en', category: 'MARKETING',
+    delay_value: 1, delay_unit: 'days', param_mapping: []
+  }]);
+
+  const updateFollowUp = (index: number, patch: Partial<DripStep>) => {
+    setFollowUps(current => current.map((step, i) => i === index ? { ...step, ...patch } : step));
+  };
+
+  const pickFollowUpTemplate = (index: number, templateName: string) => {
+    const template = templates.find(t => t.name === templateName);
+    updateFollowUp(index, {
+      template_name: templateName,
+      language: template?.language || 'en',
+      category: (template?.category || 'MARKETING').toUpperCase(),
+      param_mapping: new Array(template?.paramCount || 0).fill('')
+    });
+  };
+
   const previewRow = rows[0];
+  const mappingFields = enrollmentSource === 'webhook' ? WEBHOOK_FIELDS.map(field => field.value) : headers;
   const renderPreviewVal = (col: string) => col && previewRow ? (previewRow[col] ?? '') : '—';
 
   const submit = async (autostart: boolean) => {
     setError('');
     if (!name.trim()) { setError('Enter a campaign name.'); return; }
-    if (rows.length === 0) { setError('Upload or paste a CSV with at least one row.'); return; }
-    if (!phoneCol) { setError('Select which column holds the phone number.'); return; }
+    if (enrollmentSource === 'csv' && rows.length === 0) { setError('Upload or paste a CSV with at least one row.'); return; }
+    if (enrollmentSource === 'csv' && !phoneCol) { setError('Select which column holds the phone number.'); return; }
     if (!templateName.trim()) { setError('Enter a WhatsApp template name (or set one in Settings).'); return; }
+    if (kind === 'drip' && followUps.some(step => !step.template_name)) { setError('Select a template for every drip step.'); return; }
+    if (kind === 'drip' && enrollmentSource === 'csv' && shopifyCheckMode !== 'off' && !orderCol && !emailCol) { setError('Select an order number or email column for Shopify cross-checking.'); return; }
 
     setSaving(true);
     try {
@@ -284,11 +377,21 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name, delay_seconds: delay, template_name: templateName, language, category,
-          phone_column: phoneCol, name_column: nameCol, param_mapping: paramMapping, rows, autostart
+          phone_column: phoneCol, name_column: nameCol, param_mapping: paramMapping,
+          campaign_type: kind,
+          enrollment_source: kind === 'drip' ? enrollmentSource : 'csv',
+          trigger_event: kind === 'drip' && enrollmentSource === 'webhook' ? triggerEvent : null,
+          trigger_conditions: kind === 'drip' && enrollmentSource === 'webhook' ? triggerConditions : [],
+          shopify_check_mode: kind === 'drip' && enrollmentSource === 'csv' ? shopifyCheckMode : 'off',
+          order_column: kind === 'drip' && enrollmentSource === 'csv' ? orderCol : '', email_column: kind === 'drip' && enrollmentSource === 'csv' ? emailCol : '',
+          steps: [{
+            id: 'step_1', template_name: templateName, language, category,
+            delay_value: 0, delay_unit: 'minutes', param_mapping: paramMapping
+          }, ...(kind === 'drip' ? followUps : [])],
+          rows, autostart
         })
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create campaign');
+      await readApiResponse(res);
       onCreated();
     } catch (err: any) {
       setError(err.message);
@@ -300,15 +403,24 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
     <div className="page">
       <div className="page-header">
         <div>
-          <div className="page-title">New Campaign</div>
-          <div className="page-sub">Upload a CSV, map columns to template variables, and send</div>
+          <div className="page-title">New {kind === 'drip' ? 'Drip Campaign' : 'Campaign'}</div>
+          <div className="page-sub">{kind === 'drip' ? 'Enroll from Shopify events or CSV, apply conditions, and configure timed messages' : 'Upload an audience and send one approved WhatsApp template'}</div>
         </div>
         <button className="btn btn-secondary btn-sm" onClick={onCancel}>← Back</button>
       </div>
 
       {/* Step 1: CSV */}
       <div className="card mb-4">
-        <div className="card-header"><div className="card-title">1 · Recipients (CSV)</div></div>
+        <div className="card-header"><div><div className="card-title">1 · {kind === 'drip' ? 'Enrollment trigger' : 'Recipients (CSV)'}</div>{kind === 'drip' && <div className="card-sub">Choose how customers enter this drip campaign.</div>}</div></div>
+        {kind === 'drip' && <div className="form-group">
+          <label className="form-label">Enrollment source</label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <button className={`btn ${enrollmentSource === 'webhook' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setEnrollmentSource('webhook')}>Shopify webhook</button>
+            <button className={`btn ${enrollmentSource === 'csv' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setEnrollmentSource('csv')}>CSV audience</button>
+          </div>
+        </div>}
+
+        {enrollmentSource === 'csv' ? <>
         <div className="form-group">
           <label className="form-label">Upload CSV file</label>
           <input type="file" accept=".csv,text/csv" className="input" onChange={onFile} />
@@ -336,6 +448,35 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
             {rows.length > 5 && <div className="text-dim text-sm mt-2">…and {rows.length - 5} more</div>}
           </>
         )}
+        </> : <>
+          <div className="callout info mb-3">The campaign remains active and automatically enrolls each matching Shopify event once.</div>
+          <div className="form-group">
+            <label className="form-label">Shopify event</label>
+            <select className="select" value={triggerEvent} onChange={e => setTriggerEvent(e.target.value)}>
+              <option value="orders/create">Order created</option>
+              <option value="orders/paid">Order paid</option>
+              <option value="fulfillments/create">Order fulfilled / shipped</option>
+            </select>
+          </div>
+          <div className="divider" />
+          <div className="flex items-center justify-between mb-3">
+            <div><div className="form-label">Conditions</div><div className="form-hint">All conditions must match. Leave empty to enroll every event.</div></div>
+            <button className="btn btn-secondary btn-sm" onClick={() => setTriggerConditions(current => [...current, { field: 'totalPrice', operator: 'greater_than', value: '' }])}>+ Add condition</button>
+          </div>
+          {triggerConditions.map((condition, index) => (
+            <div key={index} style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1.2fr auto', gap: 8, marginBottom: 8 }}>
+              <select className="select" value={condition.field} onChange={e => setTriggerConditions(current => current.map((item, i) => i === index ? { ...item, field: e.target.value } : item))}>
+                {WEBHOOK_FIELDS.map(field => <option key={field.value} value={field.value}>{field.label}</option>)}
+              </select>
+              <select className="select" value={condition.operator} onChange={e => setTriggerConditions(current => current.map((item, i) => i === index ? { ...item, operator: e.target.value } : item))}>
+                <option value="equals">Equals</option><option value="not_equals">Does not equal</option><option value="contains">Contains</option>
+                <option value="greater_than">Greater than</option><option value="less_than">Less than</option><option value="exists">Exists</option><option value="not_exists">Does not exist</option>
+              </select>
+              <input className="input" value={condition.value} disabled={['exists', 'not_exists'].includes(condition.operator)} onChange={e => setTriggerConditions(current => current.map((item, i) => i === index ? { ...item, value: e.target.value } : item))} placeholder="Condition value" />
+              <button className="btn btn-ghost btn-sm" onClick={() => setTriggerConditions(current => current.filter((_, i) => i !== index))}>Remove</button>
+            </div>
+          ))}
+        </>}
       </div>
 
       {/* Step 2: Settings */}
@@ -386,14 +527,70 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
         </div>
       </div>
 
-      {/* Step 3: Mapping */}
+      {/* Step 3: Drip sequence */}
+      {kind === 'drip' && <div className="card mb-4">
+        <div className="card-header">
+          <div>
+            <div className="card-title">3 · Drip sequence</div>
+            <div className="card-sub">Each recipient advances through these messages independently.</div>
+          </div>
+          <button className="btn btn-secondary btn-sm" onClick={addFollowUp}>+ Add follow-up</button>
+        </div>
+
+        <div className="callout info mb-3">
+          Step 1 sends immediately using <span className="mono">{templateName || 'the primary template'}</span>.
+        </div>
+
+        {followUps.length === 0 ? (
+          <div className="empty-state" style={{ padding: 24 }}>
+            <p>Add a follow-up to turn this into a multi-message drip campaign.</p>
+          </div>
+        ) : followUps.map((step, index) => (
+          <div key={step.id} style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 16, marginBottom: 12 }}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="card-title">Step {index + 2}</div>
+              <button className="btn btn-ghost btn-sm" onClick={() => setFollowUps(current => current.filter((_, i) => i !== index))}>Remove</button>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 12 }}>
+              <div className="form-group">
+                <label className="form-label">WhatsApp template</label>
+                <select className="select" value={step.template_name} onChange={e => pickFollowUpTemplate(index, e.target.value)}>
+                  <option value="">— select template —</option>
+                  {templates.map(t => <option key={t.name} value={t.name}>{t.name} · {t.language}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Wait before step</label>
+                <input className="input" type="number" min={0} value={step.delay_value} onChange={e => updateFollowUp(index, { delay_value: Math.max(0, Number(e.target.value)) })} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Unit</label>
+                <select className="select" value={step.delay_unit} onChange={e => updateFollowUp(index, { delay_unit: e.target.value as DripStep['delay_unit'] })}>
+                  <option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option>
+                </select>
+              </div>
+            </div>
+            {step.param_mapping.map((column, slot) => (
+              <div key={slot} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                <span className="badge pending" style={{ minWidth: 44, justifyContent: 'center' }}>{`{{${slot + 1}}}`}</span>
+                <select className="select" value={column} onChange={e => updateFollowUp(index, { param_mapping: step.param_mapping.map((value, i) => i === slot ? e.target.value : value) })}>
+                  <option value="">— select {enrollmentSource === 'webhook' ? 'Shopify field' : 'CSV column'} —</option>
+                  {mappingFields.map(field => <option key={field} value={field}>{enrollmentSource === 'webhook' ? WEBHOOK_FIELDS.find(item => item.value === field)?.label : field}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>}
+
+      {/* Step 4: Mapping */}
       <div className="card mb-4">
-        <div className="card-header"><div className="card-title">3 · Column mapping</div></div>
-        {headers.length === 0 ? (
+        <div className="card-header"><div className="card-title">{kind === 'drip' ? `4 · ${enrollmentSource === 'webhook' ? 'Webhook data mapping' : 'Recipient and Shopify mapping'}` : '3 · Recipient and variable mapping'}</div></div>
+        {enrollmentSource === 'csv' && headers.length === 0 ? (
           <div className="callout info">Add a CSV above to map its columns.</div>
         ) : (
           <>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 20px' }}>
+            {enrollmentSource === 'csv' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 20px' }}>
               <div className="form-group">
                 <label className="form-label">Phone column (recipient)</label>
                 <select className="select" value={phoneCol} onChange={e => setPhoneCol(e.target.value)}>
@@ -410,21 +607,52 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
                 </select>
                 <div className="form-hint">Used as the contact name.</div>
               </div>
-            </div>
+            </div>}
+
+            {kind === 'drip' && enrollmentSource === 'csv' && <>
+              <div className="divider" />
+              <div className="form-group">
+              <label className="form-label">Shopify order cross-check</label>
+              <select className="select" value={shopifyCheckMode} onChange={e => setShopifyCheckMode(e.target.value)}>
+                <option value="stop_if_paid_or_fulfilled">Stop when paid, fulfilled, refunded, voided, or cancelled</option>
+                <option value="stop_if_order_found">Stop when any matching order is found</option>
+                <option value="off">Disabled</option>
+              </select>
+              <div className="form-hint">Runs before every drip step. If Shopify cannot be checked, the send fails closed and is logged.</div>
+              </div>
+              {shopifyCheckMode !== 'off' && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 20px' }}>
+                <div className="form-group">
+                  <label className="form-label">Order number column</label>
+                  <select className="select" value={orderCol} onChange={e => setOrderCol(e.target.value)}>
+                    <option value="">— not available —</option>
+                    {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Customer email column</label>
+                  <select className="select" value={emailCol} onChange={e => setEmailCol(e.target.value)}>
+                    <option value="">— not available —</option>
+                    {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </div>
+              </div>
+              )}
+            </>}
 
             <div className="divider" />
-            <label className="form-label">Template variables → CSV columns</label>
-            <div className="form-hint mb-2">Map each template placeholder to a column. Order matches {'{{1}}, {{2}}'}…</div>
+            <label className="form-label">Template variables → {enrollmentSource === 'webhook' ? 'Shopify fields' : 'CSV columns'}</label>
+            <div className="form-hint mb-2">Map each template placeholder to a {enrollmentSource === 'webhook' ? 'webhook value' : 'column'}. Order matches {'{{1}}, {{2}}'}…</div>
             {paramMapping.map((col, i) => (
               <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
                 <span className="badge pending" style={{ minWidth: 44, justifyContent: 'center' }}>{`{{${i + 1}}}`}</span>
                 <select className="select" value={col} onChange={e => setSlot(i, e.target.value)} style={{ flex: 1 }}>
-                  <option value="">— select column —</option>
-                  {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                  <option value="">— select {enrollmentSource === 'webhook' ? 'Shopify field' : 'column'} —</option>
+                  {mappingFields.map(field => <option key={field} value={field}>{enrollmentSource === 'webhook' ? WEBHOOK_FIELDS.find(item => item.value === field)?.label : field}</option>)}
                 </select>
-                <span className="text-dim text-sm" style={{ minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {enrollmentSource === 'csv' && <span className="text-dim text-sm" style={{ minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {renderPreviewVal(col)}
-                </span>
+                </span>}
                 <button className="btn btn-ghost btn-sm btn-icon" onClick={() => removeSlot(i)} title="Remove">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
@@ -432,7 +660,7 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
             ))}
             <button className="btn btn-secondary btn-sm" onClick={addSlot}>+ Add variable</button>
 
-            {previewRow && (
+            {enrollmentSource === 'csv' && previewRow && (
               <div className="callout info mt-3" style={{ display: 'block' }}>
                 <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>Preview (first row)</div>
                 <div className="text-sm">To: {nameCol ? renderPreviewVal(nameCol) + ' · ' : ''}{phoneCol ? renderPreviewVal(phoneCol) : '(no phone)'}</div>
@@ -459,13 +687,13 @@ function NewCampaign({ onCancel, onCreated }: { onCancel: () => void; onCreated:
 
 // ─── Detail view ────────────────────────────────────────────────────────────
 
-function CampaignDetailView({ id, onBack }: { id: string; onBack: () => void }) {
+function CampaignDetailView({ id, kind, onBack }: { id: string; kind: CampaignKind; onBack: () => void }) {
   const [c, setC] = useState<CampaignDetail | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = async () => {
     try {
-      const data = await fetch(`${API}/campaigns/${id}`).then(r => r.json());
+      const data = await fetch(`${API}/campaigns/${id}`).then(readApiResponse);
       setC(data);
     } catch (_) { /* ignore */ }
     setLoading(false);
@@ -495,7 +723,7 @@ function CampaignDetailView({ id, onBack }: { id: string; onBack: () => void }) 
   if (loading) return <div className="page"><div className="empty-state" style={{ padding: 40 }}><span className="spinner" /></div></div>;
   if (!c) return <div className="page"><div className="callout error">Campaign not found.</div></div>;
 
-  const done = c.sent + c.failed;
+  const done = c.sent + c.failed + (c.skipped || 0);
   const pct = c.total ? Math.round((done / c.total) * 100) : 0;
 
   return (
@@ -503,7 +731,7 @@ function CampaignDetailView({ id, onBack }: { id: string; onBack: () => void }) 
       <div className="page-header">
         <div>
           <div className="page-title">{c.name}</div>
-          <div className="page-sub">Template <span className="mono">{c.template_name}</span> · {c.delay_seconds}s between messages</div>
+          <div className="page-sub">{kind === 'drip' ? `${c.steps?.length || 1}-step drip · ${c.enrollment_source === 'webhook' ? `Webhook: ${c.trigger_event}` : 'CSV enrollment'} · ${c.delay_seconds}s pacing` : `Template ${c.template_name} · ${c.delay_seconds}s recipient pacing`}</div>
         </div>
         <div className="flex items-center gap-3">
           {statusBadge(c.status)}
@@ -523,16 +751,28 @@ function CampaignDetailView({ id, onBack }: { id: string; onBack: () => void }) 
           <div style={{ flex: 1, height: 8, background: 'var(--bg-hover)', borderRadius: 4, overflow: 'hidden' }}>
             <div style={{ width: `${pct}%`, height: '100%', background: 'var(--green)' }} />
           </div>
-          <span className="text-sm">{c.sent} sent · {c.failed} failed · {c.total} total</span>
+          <span className="text-sm">{c.sent} completed {kind === 'drip' ? `· ${c.skipped || 0} stopped ` : ''}· {c.failed} failed · {c.total} total</span>
         </div>
       </div>
 
-      <div className="card" style={{ padding: 0 }}>
+      {kind === 'drip' && <div className="card mb-4">
+        <div className="card-header"><div className="card-title">Drip sequence</div></div>
+        <div style={{ display: 'grid', gap: 10 }}>
+          {(c.steps?.length ? c.steps : [{ id: 'legacy', template_name: c.template_name, language: c.language, category: c.category, delay_value: 0, delay_unit: 'minutes' as const, param_mapping: c.param_mapping }]).map((step, index) => (
+            <div key={step.id} className="flex items-center justify-between" style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+              <div><strong>Step {index + 1}</strong> <span className="mono text-sm">{step.template_name}</span></div>
+              <span className="text-dim text-sm">{index === 0 ? 'Immediately' : `After ${step.delay_value} ${step.delay_unit}`}</span>
+            </div>
+          ))}
+        </div>
+      </div>}
+
+      <div className="card mb-4" style={{ padding: 0 }}>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>#</th><th>Name</th><th>Phone</th>
+                <th>#</th><th>Name</th><th>Phone</th>{kind === 'drip' && <><th>Step</th><th>Shopify</th></>}
                 {c.param_mapping.map((_, i) => <th key={i}>{`{{${i + 1}}}`}</th>)}
                 <th>Status</th><th>Error</th><th />
               </tr>
@@ -543,6 +783,8 @@ function CampaignDetailView({ id, onBack }: { id: string; onBack: () => void }) 
                   <td className="text-dim text-sm">{r.row_index + 1}</td>
                   <td>{r.name || '—'}</td>
                   <td className="mono text-sm">{r.phone || '—'}</td>
+                  {kind === 'drip' && <><td className="text-sm">{Math.min((r.current_step || 0) + 1, c.steps?.length || 1)} / {c.steps?.length || 1}</td>
+                  <td className="text-sm">{r.last_shopify_status || '—'}</td></>}
                   {c.param_mapping.map((_, i) => <td key={i} className="text-sm">{r.variables[String(i + 1)] ?? ''}</td>)}
                   <td>{statusBadge(r.status)}</td>
                   <td style={{ maxWidth: 220 }}>
@@ -559,20 +801,46 @@ function CampaignDetailView({ id, onBack }: { id: string; onBack: () => void }) 
           </table>
         </div>
       </div>
+
+      <div className="card" style={{ padding: 0 }}>
+        <div className="card-header" style={{ padding: '16px 18px' }}>
+          <div><div className="card-title">{kind === 'drip' ? 'Drip execution log' : 'Delivery log'}</div><div className="card-sub">{kind === 'drip' ? 'Every Shopify check and drip-step result is retained here.' : 'Every recipient send result is retained here.'}</div></div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Recipient</th>{kind === 'drip' && <th>Step</th>}<th>Template</th>{kind === 'drip' && <th>Shopify</th>}<th>Status</th><th>Error</th></tr></thead>
+            <tbody>
+              {(c.logs || []).map(log => {
+                const recipient = c.recipients.find(r => r.id === log.recipient_id);
+                return <tr key={log.id}>
+                  <td className="text-sm text-dim">{new Date(log.created_at).toLocaleString()}</td>
+                  <td>{recipient?.name || recipient?.phone || log.recipient_id}</td>
+                  {kind === 'drip' && <td>{log.step_index < 0 ? 'Enrollment' : log.step_index + 1}</td>}
+                  <td className="mono text-sm">{log.template_name || '—'}</td>
+                  {kind === 'drip' && <td className="text-sm">{log.shopify_status || '—'}</td>}
+                  <td>{statusBadge(log.status)}</td>
+                  <td className="text-sm" style={{ color: log.error_message ? 'var(--red)' : undefined }}>{log.error_message || '—'}</td>
+                </tr>;
+              })}
+              {(c.logs || []).length === 0 && <tr><td colSpan={kind === 'drip' ? 7 : 5} className="text-dim" style={{ textAlign: 'center', padding: 24 }}>No messages have run yet.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
 
 // ─── Root ───────────────────────────────────────────────────────────────────
 
-export const Campaigns: React.FC = () => {
+export const Campaigns: React.FC<{ kind?: CampaignKind }> = ({ kind = 'bulk' }) => {
   const [view, setView] = useState<View>({ kind: 'list' });
 
   if (view.kind === 'new') {
-    return <NewCampaign onCancel={() => setView({ kind: 'list' })} onCreated={() => setView({ kind: 'list' })} />;
+    return <NewCampaign kind={kind} onCancel={() => setView({ kind: 'list' })} onCreated={() => setView({ kind: 'list' })} />;
   }
   if (view.kind === 'detail') {
-    return <CampaignDetailView id={view.id} onBack={() => setView({ kind: 'list' })} />;
+    return <CampaignDetailView id={view.id} kind={kind} onBack={() => setView({ kind: 'list' })} />;
   }
-  return <CampaignList onNew={() => setView({ kind: 'new' })} onOpen={id => setView({ kind: 'detail', id })} />;
+  return <CampaignList kind={kind} onNew={() => setView({ kind: 'new' })} onOpen={id => setView({ kind: 'detail', id })} />;
 };

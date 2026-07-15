@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-const API_VERSION = '2024-01';
+const API_VERSION = '2026-07';
 
 // Webhook topics auto-registered after a successful OAuth connect.
 const WEBHOOK_TOPICS = ['orders/create', 'orders/paid', 'checkouts/create', 'checkouts/update', 'fulfillments/create'];
@@ -84,6 +84,70 @@ export async function fetchAbandonedCheckouts({ shop, token, limit = 50 }) {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`Fetch abandoned checkouts failed (HTTP ${res.status})`);
   return body.checkouts || [];
+}
+
+function shopifySearchValue(value) {
+  return String(value || '').trim().replace(/[\\"]/g, '\\$&');
+}
+
+async function findOrder(shop, token, searchQuery) {
+  const query = `
+    query CampaignOrderCheck($query: String!) {
+      orders(first: 1, query: $query, sortKey: CREATED_AT, reverse: true) {
+        nodes {
+          id
+          name
+          email
+          displayFinancialStatus
+          displayFulfillmentStatus
+          cancelledAt
+        }
+      }
+    }
+  `;
+  const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': token
+    },
+    body: JSON.stringify({ query, variables: { query: searchQuery } })
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.errors) {
+    const detail = body.errors?.[0]?.message || `HTTP ${res.status}`;
+    throw new Error(`Shopify order check failed: ${detail}`);
+  }
+  return body.data?.orders?.nodes?.[0] || null;
+}
+
+/**
+ * Look up the newest matching Shopify order. Prefer the exact order name/number
+ * from the CSV and fall back to email when the campaign is customer-based.
+ */
+export async function checkShopifyOrder({ shop, token, orderReference, email }) {
+  if (!shop || !token) throw new Error('Shopify is not configured in Settings');
+
+  let order = null;
+  const ref = shopifySearchValue(orderReference);
+  const customerEmail = shopifySearchValue(email);
+  if (ref) order = await findOrder(shop, token, `name:\"${ref.startsWith('#') ? ref : `#${ref}`}\"`);
+  if (!order && customerEmail) order = await findOrder(shop, token, `email:\"${customerEmail}\"`);
+
+  if (!order) return { matched: false, shouldStop: false, status: 'NOT_FOUND', order: null };
+
+  const financial = String(order.displayFinancialStatus || 'UNKNOWN').toUpperCase();
+  const fulfillment = String(order.displayFulfillmentStatus || 'UNKNOWN').toUpperCase();
+  const shouldStop = Boolean(order.cancelledAt)
+    || ['PAID', 'PARTIALLY_PAID', 'REFUNDED', 'PARTIALLY_REFUNDED', 'VOIDED'].includes(financial)
+    || ['FULFILLED'].includes(fulfillment);
+
+  return {
+    matched: true,
+    shouldStop,
+    status: order.cancelledAt ? 'CANCELLED' : `${financial}/${fulfillment}`,
+    order
+  };
 }
 
 export { WEBHOOK_TOPICS, API_VERSION };

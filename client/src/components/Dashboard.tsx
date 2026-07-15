@@ -101,8 +101,9 @@ export const Dashboard: React.FC<{ onNavigate?: (tab: any) => void }> = ({ onNav
         </div>
       </div>
 
+      <div className="dashboard-content-grid">
       {/* Recent Logs */}
-      <div className="card">
+      <div className="card dashboard-executions">
         <div className="card-header">
           <div>
             <div className="card-title">Recent Executions</div>
@@ -158,17 +159,18 @@ export const Dashboard: React.FC<{ onNavigate?: (tab: any) => void }> = ({ onNav
       </div>
 
       {/* Quick Links */}
-      <div className="flex gap-3 mt-4">
-        <div className="card" style={{ flex: 1 }}>
+      <div className="dashboard-side-stack">
+        <div className="card dashboard-side-card">
           <div className="card-title" style={{ marginBottom: 8 }}>Shopify webhook</div>
           <div className="text-sm text-muted" style={{ marginBottom: 10 }}>Add this URL in Shopify → Settings → Notifications → Webhooks</div>
           <WebhookUrlDisplay />
         </div>
-        <div className="card" style={{ flex: 1 }}>
+        <div className="card dashboard-side-card">
           <div className="card-title" style={{ marginBottom: 8 }}>Automation workspace</div>
           <div className="text-sm text-muted" style={{ marginBottom: 10 }}>Build and manage automation flows with drag-and-drop</div>
           <button className="btn btn-secondary btn-sm w-full" onClick={() => onNavigate?.('flows')}>Open Flow Builder →</button>
         </div>
+      </div>
       </div>
     </div>
   );

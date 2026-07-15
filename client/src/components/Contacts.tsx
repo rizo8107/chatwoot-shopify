@@ -73,8 +73,15 @@ function Segment() {
   const load = () => {
     setLoading(true); setErr('');
     fetch(`${API}/chatwoot/contacts?maxPages=40`).then(async r => {
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'Failed to fetch contacts');
+      const text = await r.text();
+      let d: any = {};
+      try { d = text ? JSON.parse(text) : {}; } catch { d = {}; }
+      if (!r.ok) {
+        const fallback = r.status === 502 || r.status === 503
+          ? 'Backend is starting or unavailable. Run npm run dev from the project root, then retry.'
+          : 'Failed to fetch contacts';
+        throw new Error(d.error || fallback);
+      }
       setContacts(d.contacts || []);
     }).catch(e => setErr(e.message)).finally(() => setLoading(false));
   };

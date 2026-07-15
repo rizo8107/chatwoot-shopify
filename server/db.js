@@ -138,10 +138,19 @@ export async function initDb() {
       phone_column TEXT NOT NULL DEFAULT '',
       name_column TEXT NOT NULL DEFAULT '',
       param_mapping TEXT NOT NULL DEFAULT '[]',
+      steps TEXT NOT NULL DEFAULT '[]',
+      shopify_check_mode TEXT NOT NULL DEFAULT 'off',
+      order_column TEXT NOT NULL DEFAULT '',
+      email_column TEXT NOT NULL DEFAULT '',
+      campaign_type TEXT NOT NULL DEFAULT 'bulk',
+      enrollment_source TEXT NOT NULL DEFAULT 'csv',
+      trigger_event TEXT,
+      trigger_conditions TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL DEFAULT 'draft',
       total INTEGER NOT NULL DEFAULT 0,
       sent INTEGER NOT NULL DEFAULT 0,
       failed INTEGER NOT NULL DEFAULT 0,
+      skipped INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       started_at TEXT
     )
@@ -154,7 +163,12 @@ export async function initDb() {
       row_index INTEGER NOT NULL,
       phone TEXT,
       name TEXT,
+      email TEXT,
+      order_reference TEXT,
       variables TEXT NOT NULL DEFAULT '{}',
+      step_variables TEXT NOT NULL DEFAULT '[]',
+      current_step INTEGER NOT NULL DEFAULT 0,
+      last_shopify_status TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
       error_message TEXT,
       run_at TEXT,
@@ -247,6 +261,39 @@ export async function initDb() {
   `);
   await run(`CREATE INDEX IF NOT EXISTS idx_ac_jobs_due ON abandoned_cart_jobs (status, run_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_ac_jobs_token ON abandoned_cart_jobs (checkout_token)`);
+
+  try { await run(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS steps TEXT NOT NULL DEFAULT '[]'`); } catch (_) {}
+  try { await run(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS shopify_check_mode TEXT NOT NULL DEFAULT 'off'`); } catch (_) {}
+  try { await run(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS order_column TEXT NOT NULL DEFAULT ''`); } catch (_) {}
+  try { await run(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS email_column TEXT NOT NULL DEFAULT ''`); } catch (_) {}
+  try { await run(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS campaign_type TEXT NOT NULL DEFAULT 'bulk'`); } catch (_) {}
+  try { await run(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS enrollment_source TEXT NOT NULL DEFAULT 'csv'`); } catch (_) {}
+  try { await run(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS trigger_event TEXT`); } catch (_) {}
+  try { await run(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS trigger_conditions TEXT NOT NULL DEFAULT '[]'`); } catch (_) {}
+  await run(`CREATE INDEX IF NOT EXISTS idx_campaigns_webhook_trigger ON campaigns (campaign_type, enrollment_source, trigger_event, status)`);
+  try { await run(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS skipped INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+  try { await run(`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS email TEXT`); } catch (_) {}
+  try { await run(`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS order_reference TEXT`); } catch (_) {}
+  try { await run(`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS step_variables TEXT NOT NULL DEFAULT '[]'`); } catch (_) {}
+  try { await run(`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS current_step INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+  try { await run(`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS last_shopify_status TEXT`); } catch (_) {}
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS campaign_message_logs (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      recipient_id TEXT NOT NULL,
+      step_index INTEGER NOT NULL,
+      template_name TEXT,
+      status TEXT NOT NULL,
+      shopify_status TEXT,
+      chatwoot_message_id TEXT,
+      error_message TEXT,
+      details TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_campaign_logs_campaign ON campaign_message_logs (campaign_id, created_at)`);
 
   console.log('[DB] Initialized (InsForge Postgres)');
 }
@@ -385,6 +432,7 @@ export async function getMetrics() {
     FROM ranked
     WHERE duplicate_rank = 1
   `);
+
   return {
     total: Number(stats.total) || 0,
     success: Number(stats.success) || 0,
@@ -498,44 +546,50 @@ export async function markJobStatus(id, status, error_message = null) {
 
 // ─── Campaigns ──────────────────────────────────────────────────────────────
 
-export async function createCampaign({ id, name, template_name, language, category, delay_seconds, phone_column, name_column, param_mapping, recipients }) {
+export async function createCampaign({ id, name, template_name, language, category, delay_seconds, phone_column, name_column, param_mapping, steps, shopify_check_mode, order_column, email_column, campaign_type, enrollment_source, trigger_event, trigger_conditions, recipients }) {
   const now = new Date().toISOString();
   await run(
-    `INSERT INTO campaigns (id, name, template_name, language, category, delay_seconds, phone_column, name_column, param_mapping, status, total, sent, failed, created_at, started_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, 0, 0, ?, NULL)`,
-    [id, name, template_name, language || 'en', category || 'UTILITY', delay_seconds || 5, phone_column || '', name_column || '', JSON.stringify(param_mapping || []), recipients.length, now]
+    `INSERT INTO campaigns (id, name, template_name, language, category, delay_seconds, phone_column, name_column, param_mapping, steps, shopify_check_mode, order_column, email_column, campaign_type, enrollment_source, trigger_event, trigger_conditions, status, total, sent, failed, skipped, created_at, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, 0, 0, 0, ?, NULL)`,
+    [id, name, template_name, language || 'en', category || 'UTILITY', delay_seconds || 5, phone_column || '', name_column || '', JSON.stringify(param_mapping || []), JSON.stringify(steps || []), shopify_check_mode || 'off', order_column || '', email_column || '', campaign_type || 'bulk', enrollment_source || 'csv', trigger_event || null, JSON.stringify(trigger_conditions || []), recipients.length, now]
   );
   for (const r of recipients) {
     await run(
-      `INSERT INTO campaign_recipients (id, campaign_id, row_index, phone, name, variables, status, error_message, run_at, sent_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL)`,
-      [`${id}_r${r.row_index}`, id, r.row_index, r.phone || '', r.name || '', JSON.stringify(r.variables || {})]
+      `INSERT INTO campaign_recipients (id, campaign_id, row_index, phone, name, email, order_reference, variables, step_variables, current_step, status, error_message, run_at, sent_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', NULL, NULL, NULL)`,
+      [`${id}_r${r.row_index}`, id, r.row_index, r.phone || '', r.name || '', r.email || '', r.order_reference || '', JSON.stringify(r.variables || {}), JSON.stringify(r.step_variables || [])]
     );
   }
 }
 
 export async function getCampaigns() {
-  return all(
-    `SELECT id, name, template_name, status, delay_seconds, total, sent, failed, created_at, started_at
+  const campaigns = await all(
+    `SELECT id, name, template_name, status, delay_seconds, total, sent, failed, skipped, steps, shopify_check_mode, campaign_type, enrollment_source, trigger_event, trigger_conditions, created_at, started_at
      FROM campaigns ORDER BY created_at DESC`
   );
+  return campaigns.map(c => ({ ...c, steps: JSON.parse(c.steps || '[]'), trigger_conditions: JSON.parse(c.trigger_conditions || '[]') }));
 }
 
 export async function getCampaignById(id) {
   const c = await get(`SELECT * FROM campaigns WHERE id = ?`, [id]);
   if (!c) return null;
   c.param_mapping = JSON.parse(c.param_mapping || '[]');
+  c.steps = JSON.parse(c.steps || '[]');
+  c.trigger_conditions = JSON.parse(c.trigger_conditions || '[]');
   const recipients = await all(
-    `SELECT id, row_index, phone, name, variables, status, error_message, run_at, sent_at
+    `SELECT id, row_index, phone, name, email, order_reference, variables, step_variables, current_step, last_shopify_status, status, error_message, run_at, sent_at
      FROM campaign_recipients WHERE campaign_id = ? ORDER BY row_index ASC`,
     [id]
   );
-  c.recipients = recipients.map(r => ({ ...r, variables: JSON.parse(r.variables || '{}') }));
+  c.recipients = recipients.map(r => ({ ...r, variables: JSON.parse(r.variables || '{}'), step_variables: JSON.parse(r.step_variables || '[]') }));
+  c.logs = await all(`SELECT * FROM campaign_message_logs WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 500`, [id]);
+  c.logs = c.logs.map(log => ({ ...log, details: JSON.parse(log.details || '{}') }));
   return c;
 }
 
 export async function deleteCampaign(id) {
   await run(`DELETE FROM campaign_recipients WHERE campaign_id = ?`, [id]);
+  await run(`DELETE FROM campaign_message_logs WHERE campaign_id = ?`, [id]);
   await run(`DELETE FROM campaigns WHERE id = ?`, [id]);
 }
 
@@ -547,13 +601,20 @@ export async function startCampaign(id) {
   const campaign = await get(`SELECT * FROM campaigns WHERE id = ?`, [id]);
   if (!campaign) throw new Error('Campaign not found');
   const delayMs = (campaign.delay_seconds || 5) * 1000;
+  const dripSteps = JSON.parse(campaign.steps || '[]');
   const pending = await all(
-    `SELECT id FROM campaign_recipients WHERE campaign_id = ? AND status = 'pending' ORDER BY row_index ASC`,
+    `SELECT id, current_step, run_at FROM campaign_recipients WHERE campaign_id = ? AND status = 'pending' ORDER BY row_index ASC`,
     [id]
   );
   const base = Date.now();
   for (let i = 0; i < pending.length; i++) {
-    const runAt = new Date(base + i * delayMs).toISOString();
+    // Resume keeps an already scheduled drip deadline. Fresh/retried rows get
+    // the delay belonging to their current step plus recipient pacing.
+    if (pending[i].run_at) continue;
+    const step = dripSteps[Number(pending[i].current_step || 0)] || {};
+    const amount = Math.max(0, Number(step.delay_value || 0));
+    const multiplier = step.delay_unit === 'days' ? 86400000 : step.delay_unit === 'hours' ? 3600000 : 60000;
+    const runAt = new Date(base + amount * multiplier + i * delayMs).toISOString();
     await run(`UPDATE campaign_recipients SET run_at = ? WHERE id = ?`, [runAt, pending[i].id]);
   }
   await run(
@@ -568,7 +629,7 @@ export async function pauseCampaign(id) {
 
 export async function getDueCampaignRecipients(limit = 20) {
   return all(
-    `SELECT cr.*, c.template_name, c.language, c.category
+    `SELECT cr.*, c.template_name, c.language, c.category, c.steps, c.shopify_check_mode
      FROM campaign_recipients cr
      JOIN campaigns c ON c.id = cr.campaign_id
      WHERE cr.status = 'pending' AND cr.run_at IS NOT NULL AND cr.run_at <= ? AND c.status = 'running'
@@ -580,20 +641,73 @@ export async function getDueCampaignRecipients(limit = 20) {
 export async function markRecipientStatus(id, status, error_message = null) {
   await run(
     `UPDATE campaign_recipients SET status = ?, error_message = ?, sent_at = ? WHERE id = ?`,
-    [status, error_message || null, status === 'sent' ? new Date().toISOString() : null, id]
+    [status, error_message || null, ['sent', 'skipped'].includes(status) ? new Date().toISOString() : null, id]
+  );
+}
+
+export async function getWebhookDripCampaigns(triggerEvent) {
+  const campaigns = await all(
+    `SELECT * FROM campaigns
+     WHERE campaign_type = 'drip' AND enrollment_source = 'webhook' AND trigger_event = ? AND status = 'running'`,
+    [triggerEvent]
+  );
+  return campaigns.map(c => ({
+    ...c,
+    steps: JSON.parse(c.steps || '[]'),
+    trigger_conditions: JSON.parse(c.trigger_conditions || '[]')
+  }));
+}
+
+/** Enroll one webhook event once. Returns true only when a new row was inserted. */
+export async function enrollCampaignRecipient({ id, campaign, phone, name, email, order_reference, variables, step_variables }) {
+  const step = campaign.steps?.[0] || {};
+  const amount = Math.max(0, Number(step.delay_value || 0));
+  const multiplier = step.delay_unit === 'days' ? 86400000 : step.delay_unit === 'hours' ? 3600000 : 60000;
+  const runAt = new Date(Date.now() + amount * multiplier).toISOString();
+  const row = await get(`SELECT COALESCE(MAX(row_index), -1) + 1 AS next_index FROM campaign_recipients WHERE campaign_id = ?`, [campaign.id]);
+  const result = await run(
+    `INSERT INTO campaign_recipients (id, campaign_id, row_index, phone, name, email, order_reference, variables, step_variables, current_step, status, error_message, run_at, sent_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', NULL, ?, NULL)
+     ON CONFLICT (id) DO NOTHING`,
+    [id, campaign.id, Number(row?.next_index || 0), phone || '', name || '', email || '', order_reference || '', JSON.stringify(variables || {}), JSON.stringify(step_variables || []), runAt]
+  );
+  if (!result.changes) return false;
+  await run(`UPDATE campaigns SET total = total + 1 WHERE id = ?`, [campaign.id]);
+  return true;
+}
+
+export async function advanceCampaignRecipient(id, current_step, run_at, last_shopify_status = null) {
+  await run(
+    `UPDATE campaign_recipients SET current_step = ?, run_at = ?, last_shopify_status = ?, error_message = NULL WHERE id = ?`,
+    [current_step, run_at, last_shopify_status, id]
+  );
+}
+
+export async function logCampaignMessage({ id, campaign_id, recipient_id, step_index, template_name, status, shopify_status, chatwoot_message_id, error_message, details }) {
+  await run(
+    `INSERT INTO campaign_message_logs (id, campaign_id, recipient_id, step_index, template_name, status, shopify_status, chatwoot_message_id, error_message, details, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, shopify_status = EXCLUDED.shopify_status, chatwoot_message_id = EXCLUDED.chatwoot_message_id, error_message = EXCLUDED.error_message, details = EXCLUDED.details`,
+    [id, campaign_id, recipient_id, step_index, template_name || null, status, shopify_status || null, chatwoot_message_id || null, error_message || null, JSON.stringify(details || {}), new Date().toISOString()]
   );
 }
 
 export async function incrementCampaignCounter(id, field) {
   if (field === 'sent') await run(`UPDATE campaigns SET sent = sent + 1 WHERE id = ?`, [id]);
   else if (field === 'failed') await run(`UPDATE campaigns SET failed = failed + 1 WHERE id = ?`, [id]);
+  else if (field === 'skipped') await run(`UPDATE campaigns SET skipped = skipped + 1 WHERE id = ?`, [id]);
 }
 
 export async function finalizeCampaignIfDone(id) {
   const row = await get(
-    `SELECT COUNT(*) as pending FROM campaign_recipients WHERE campaign_id = ? AND status = 'pending'`,
+    `SELECT c.enrollment_source,
+       (SELECT COUNT(*) FROM campaign_recipients cr WHERE cr.campaign_id = c.id AND cr.status = 'pending') AS pending
+     FROM campaigns c WHERE c.id = ?`,
     [id]
   );
+  // Webhook drips are standing automations: finishing the currently enrolled
+  // recipients must not disable future Shopify-event enrollments.
+  if (row?.enrollment_source === 'webhook') return;
   if (row && Number(row.pending) === 0) {
     await run(`UPDATE campaigns SET status = 'completed' WHERE id = ? AND status = 'running'`, [id]);
   }
