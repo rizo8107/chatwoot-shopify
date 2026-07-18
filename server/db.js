@@ -76,6 +76,14 @@ export async function initDb() {
   try { await run(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS delivered_at TEXT`); } catch (_) {}
   try { await run(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS read_at TEXT`); } catch (_) {}
   await run(`CREATE INDEX IF NOT EXISTS idx_transactions_chatwoot_message ON transactions (chatwoot_message_id)`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS pending_delivery_updates (
+      chatwoot_message_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      error_message TEXT,
+      updated_at TEXT NOT NULL
+    )
+  `);
 
   // Idempotency guard — one row per (sender scope + topic + order/checkout id).
   // A WhatsApp send only proceeds if it can claim this key, so retries, duplicate
@@ -359,18 +367,60 @@ export async function getTransactionById(id) {
 
 export async function setTransactionChatwootMessageId(id, chatwootMessageId) {
   if (!chatwootMessageId) return;
-  await run(`UPDATE transactions SET chatwoot_message_id = ? WHERE id = ?`, [String(chatwootMessageId), id]);
+  const messageId = String(chatwootMessageId);
+  await run(`UPDATE transactions SET chatwoot_message_id = ? WHERE id = ?`, [messageId, id]);
+  const pending = await get(`SELECT status, error_message FROM pending_delivery_updates WHERE chatwoot_message_id = ?`, [messageId]);
+  if (pending) {
+    await applyDeliveryStatus(messageId, pending.status, pending.error_message);
+    await run(`DELETE FROM pending_delivery_updates WHERE chatwoot_message_id = ?`, [messageId]);
+  } else {
+    await applyDeliveryStatus(messageId, 'sent');
+  }
 }
 
-/** Update delivery status (sent/delivered/read/failed) for whichever transaction sent this Chatwoot message. */
-export async function updateDeliveryStatusByMessageId(chatwootMessageId, status) {
+const DELIVERY_RANK = { sent: 1, delivered: 2, read: 3, failed: 4 };
+
+async function applyDeliveryStatus(chatwootMessageId, status, errorMessage = null) {
+  const current = await get(`SELECT delivery_status FROM transactions WHERE chatwoot_message_id = ?`, [String(chatwootMessageId)]);
+  if (!current) return false;
+  if ((DELIVERY_RANK[current.delivery_status] || 0) > (DELIVERY_RANK[status] || 0)) return true;
+
   const sets = ['delivery_status = ?'];
   const params = [status];
   if (status === 'delivered') { sets.push('delivered_at = ?'); params.push(new Date().toISOString()); }
   if (status === 'read') { sets.push('read_at = ?'); params.push(new Date().toISOString()); }
+  if (status === 'failed') {
+    sets.push(`status = 'failed'`);
+    sets.push('error_message = COALESCE(?, error_message)');
+    params.push(errorMessage || 'WhatsApp delivery failed after Chatwoot accepted the message');
+  }
   params.push(String(chatwootMessageId));
   const res = await run(`UPDATE transactions SET ${sets.join(', ')} WHERE chatwoot_message_id = ?`, params);
   return res.changes > 0;
+}
+
+/**
+ * Update delivery state even when Chatwoot's webhook beats the sender's DB
+ * update. Early events are retained and applied when the message ID is linked.
+ */
+export async function updateDeliveryStatusByMessageId(chatwootMessageId, status, errorMessage = null) {
+  const messageId = String(chatwootMessageId || '');
+  if (!messageId || !DELIVERY_RANK[status]) return false;
+  if (await applyDeliveryStatus(messageId, status, errorMessage)) return true;
+
+  const existing = await get(`SELECT status FROM pending_delivery_updates WHERE chatwoot_message_id = ?`, [messageId]);
+  if (!existing || (DELIVERY_RANK[status] || 0) >= (DELIVERY_RANK[existing.status] || 0)) {
+    await run(
+      `INSERT INTO pending_delivery_updates (chatwoot_message_id, status, error_message, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (chatwoot_message_id) DO UPDATE SET
+         status = EXCLUDED.status,
+         error_message = EXCLUDED.error_message,
+         updated_at = EXCLUDED.updated_at`,
+      [messageId, status, errorMessage, new Date().toISOString()]
+    );
+  }
+  return false;
 }
 
 // ─── Notification Idempotency ──────────────────────────────────────────────

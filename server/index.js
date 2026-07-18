@@ -61,7 +61,8 @@ import {
   extractFulfillmentDetails,
   extractCheckoutDetails,
   executeFlow,
-  normalizePhone
+  normalizePhone,
+  requireApprovedTemplate
 } from './chatwoot.js';
 
 import { startScheduler } from './scheduler.js';
@@ -361,6 +362,24 @@ app.post('/api/abandoned-carts/sync', async (req, res) => {
 
 // ─── Abandoned Cart Recovery Flows ────────────────────────────────────────
 
+async function validateRecoveryMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error('Add at least one recovery message');
+  }
+  const settings = await getAllSettings();
+  for (const [index, message] of messages.entries()) {
+    const template = await requireApprovedTemplate(settings, message?.template_name);
+    const mapping = message?.variable_mapping || {};
+    const missing = [];
+    for (let parameter = 1; parameter <= template.bodyParamCount; parameter++) {
+      if (!mapping[`{{${parameter}}}`]) missing.push(`{{${parameter}}}`);
+    }
+    if (missing.length > 0) {
+      throw new Error(`Recovery message ${index + 1} is missing mappings for ${missing.join(', ')}`);
+    }
+  }
+}
+
 app.get('/api/abandoned-cart-flows', async (req, res) => {
   try {
     const flows = await getAbandonedCartFlows();
@@ -379,18 +398,22 @@ app.get('/api/abandoned-cart-flows/:id', async (req, res) => {
 app.post('/api/abandoned-cart-flows', async (req, res) => {
   try {
     const { id, name, description, is_active, messages } = req.body;
+    if (!String(name || '').trim()) return res.status(400).json({ error: 'Flow name is required' });
+    await validateRecoveryMessages(messages);
     const flowId = id || genId('acf');
     await saveAbandonedCartFlow({ id: flowId, name, description, is_active: is_active !== false, messages: messages || [] });
     res.json({ success: true, id: flowId });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.put('/api/abandoned-cart-flows/:id', async (req, res) => {
   try {
     const { name, description, is_active, messages } = req.body;
+    if (!String(name || '').trim()) return res.status(400).json({ error: 'Flow name is required' });
+    await validateRecoveryMessages(messages);
     await saveAbandonedCartFlow({ id: req.params.id, name, description, is_active: is_active !== false, messages: messages || [] });
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.delete('/api/abandoned-cart-flows/:id', async (req, res) => {
@@ -874,12 +897,17 @@ app.post('/api/webhook/shopify', async (req, res) => {
 app.post('/api/webhook/chatwoot', async (req, res) => {
   try {
     const body = req.body || {};
-    const messageId = body.id;
+    const message = body.message || body;
+    const messageId = message.id;
     // Chatwoot sends the WhatsApp-reported status on message_updated events;
     // fall back to conversation_status_changed payloads being no-ops here.
-    const status = body.status;
+    const status = message.status;
+    const deliveryError = message.content_attributes?.external_error
+      || message.content_attributes?.external_error_message
+      || message.external_error
+      || null;
     if (messageId && ['sent', 'delivered', 'read', 'failed'].includes(status)) {
-      await updateDeliveryStatusByMessageId(messageId, status);
+      await updateDeliveryStatusByMessageId(messageId, status, deliveryError);
     }
     res.status(200).json({ success: true });
   } catch (err) {
@@ -1059,6 +1087,18 @@ app.post('/api/campaigns', async (req, res) => {
         }];
     if (normalizedSteps.some(step => !step.template_name)) {
       return res.status(400).json({ error: 'Every drip step must have a WhatsApp template' });
+    }
+    for (const [index, step] of normalizedSteps.entries()) {
+      const template = await requireApprovedTemplate(settings, step.template_name);
+      const missing = [];
+      for (let parameter = 0; parameter < template.bodyParamCount; parameter++) {
+        if (!step.param_mapping[parameter]) missing.push(`{{${parameter + 1}}}`);
+      }
+      if (missing.length > 0) {
+        return res.status(400).json({
+          error: `Campaign step ${index + 1} is missing mappings for ${missing.join(', ')}`
+        });
+      }
     }
     const checkMode = source === 'webhook'
       ? 'off'

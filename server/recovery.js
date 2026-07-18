@@ -14,7 +14,8 @@ import {
   updateAbandonedCartJob,
   cancelAbandonedCartJobsForToken,
   markCartRecoveredByToken,
-  logTransaction
+  logTransaction,
+  setTransactionChatwootMessageId
 } from './db.js';
 import { sendWhatsAppTemplate, normalizePhone } from './chatwoot.js';
 
@@ -149,8 +150,9 @@ async function runJob(job) {
     }
 
     // Surface in the Logs page alongside webhook/flow/campaign transactions.
+    const transactionId = `tx_acr_${job.id}`;
     await logTransaction({
-      id: `tx_acr_${job.id}`,
+      id: transactionId,
       flow_id: job.flow_id,
       order_number: null,
       customer_name: context.fullName,
@@ -160,6 +162,9 @@ async function runJob(job) {
       steps: [step],
       error_message: result.ok ? null : result.error
     });
+    if (result.chatwootMessageId) {
+      await setTransactionChatwootMessageId(transactionId, result.chatwootMessageId);
+    }
   } catch (err) {
     await updateAbandonedCartJob(job.id, { status: 'failed', error_message: err.message }).catch(() => {});
     console.error(`[Recovery] Job ${job.id} unhandled error:`, err.message);

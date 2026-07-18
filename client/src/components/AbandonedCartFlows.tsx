@@ -284,6 +284,16 @@ export const AbandonedCartFlows: React.FC = () => {
       setError('Choose a WhatsApp template for every message.');
       return;
     }
+    if (editorStep === 2) {
+      for (const [index, message] of editingFlow.messages.entries()) {
+        const template = templates.find(item => item.name === message.template_name);
+        const missing = (template?.variables || []).filter(variable => !message.variable_mapping?.[variable.placeholder]);
+        if (missing.length > 0) {
+          setError(`Message ${index + 1}: map ${missing.map(variable => variable.placeholder).join(', ')} before continuing.`);
+          return;
+        }
+      }
+    }
     setEditorStep(step => Math.min(3, step + 1));
   };
 
@@ -325,7 +335,10 @@ export const AbandonedCartFlows: React.FC = () => {
         })
       });
 
-      if (!res.ok) throw new Error('Failed to save flow');
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to save flow');
+      }
       await loadFlows();
       setEditingFlow(null);
       setIsCreating(false);

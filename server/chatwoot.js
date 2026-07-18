@@ -136,9 +136,11 @@ export function normalizePhone(phone, fallbackSourceId) {
 
 /**
  * Cached template info: body text and button components keyed by template name.
- * Shape: { at: timestamp, templates: { [name]: { body: string, buttons: [{index, varCount}] } } }
+ * Shape: { at: timestamp, templates: { [name]: {
+ *   body, bodyParamCount, buttons, category, language, status
+ * } } }
  */
-let _templateCache = { at: 0, templates: {} };
+let _templateCache = { at: 0, key: '', templates: {} };
 
 /**
  * Refresh the template cache from Chatwoot once every 60s.
@@ -146,12 +148,16 @@ let _templateCache = { at: 0, templates: {} };
  */
 async function refreshTemplateCache(settings) {
   const now = Date.now();
-  if (now - _templateCache.at < 60_000) return; // still fresh
+  const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
+  const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
+  const inboxId = settings.CHATWOOT_INBOX_ID || '1';
+  const cacheKey = `${apiBaseUrl}|${accountId}|${inboxId}`;
+  if (_templateCache.key === cacheKey && now - _templateCache.at < 60_000) return;
+  if (_templateCache.key !== cacheKey) {
+    _templateCache = { at: 0, key: cacheKey, templates: {} };
+  }
   try {
-    const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
     const token = settings.CHATWOOT_API_TOKEN;
-    const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
-    const inboxId = settings.CHATWOOT_INBOX_ID || '1';
     if (!apiBaseUrl || !token) return;
     const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`, { headers: { api_access_token: token } });
     if (!r.ok) return;
@@ -177,9 +183,22 @@ async function refreshTemplateCache(settings) {
           }
         });
       });
-      templates[t.name] = { body: bodyComp?.text || '', buttons };
+      const body = bodyComp?.text || '';
+      const bodyParamIndexes = [...new Set(
+        (body.match(/\{\{\s*(\d+)\s*\}\}/g) || [])
+          .map(value => Number(value.replace(/\D/g, '')))
+          .filter(Number.isInteger)
+      )];
+      templates[t.name] = {
+        body,
+        bodyParamCount: bodyParamIndexes.length ? Math.max(...bodyParamIndexes) : 0,
+        buttons,
+        category: String(t.category || 'MARKETING').toUpperCase(),
+        language: t.language || 'en',
+        status: String(t.status || '').toUpperCase()
+      };
     }
-    _templateCache = { at: now, templates };
+    _templateCache = { at: now, key: cacheKey, templates };
   } catch (_) { /* keep stale cache on failure */ }
 }
 
@@ -190,6 +209,14 @@ export async function getTemplateBody(settings, templateName) {
   if (!templateName) return null;
   await refreshTemplateCache(settings);
   return _templateCache.templates[templateName]?.body || null;
+}
+
+/** Return the complete approved-template definition, or null when unavailable. */
+export async function getTemplateDefinition(settings, templateName) {
+  const normalizedName = String(templateName || '').trim();
+  if (!normalizedName) return null;
+  await refreshTemplateCache(settings);
+  return _templateCache.templates[normalizedName] || null;
 }
 
 /**
@@ -266,11 +293,33 @@ export function renderTemplateBody(body, processedParams) {
  * with more complete data (e.g. checkouts/update once the customer types
  * their name) retry the same send successfully instead of failing forever.
  */
-function assertParamsComplete(processedParamsBody) {
-  const missing = Object.entries(processedParamsBody).filter(([, v]) => !v).map(([k]) => `{{${k}}}`);
+export function assertParamsComplete(processedParamsBody, expectedCount = null) {
+  const params = processedParamsBody || {};
+  if (Number.isInteger(expectedCount) && expectedCount > 0) {
+    const missingIndexes = [];
+    for (let index = 1; index <= expectedCount; index++) {
+      if (!params[String(index)]) missingIndexes.push(`{{${index}}}`);
+    }
+    if (missingIndexes.length > 0) {
+      throw new Error(`Missing value for template parameter(s) ${missingIndexes.join(', ')} — not sending`);
+    }
+  }
+  const missing = Object.entries(params).filter(([, v]) => !v).map(([k]) => `{{${k}}}`);
   if (missing.length > 0) {
     throw new Error(`Missing value for template parameter(s) ${missing.join(', ')} — not sending`);
   }
+}
+
+/** Fail closed before creating a Chatwoot conversation for a bad template. */
+export async function requireApprovedTemplate(settings, templateName) {
+  const normalizedName = String(templateName || '').trim();
+  if (!normalizedName) throw new Error('No WhatsApp template name configured — not sending');
+  const template = await getTemplateDefinition(settings, normalizedName);
+  if (!template) throw new Error(`WhatsApp template "${normalizedName}" was not found in the configured Chatwoot inbox — not sending`);
+  if (template.status !== 'APPROVED') {
+    throw new Error(`WhatsApp template "${normalizedName}" is ${template.status || 'not approved'}, not APPROVED — not sending`);
+  }
+  return { name: normalizedName, ...template };
 }
 
 // ─── Contact resolution (reuse existing contacts, don't fail on 422) ─────────
@@ -292,6 +341,24 @@ async function findExistingContactId(apiBaseUrl, accountId, token, { email, phon
   return null;
 }
 
+function isUsefulContactName(name) {
+  const value = String(name || '').trim();
+  if (!value || /^(customer|valued customer)$/i.test(value)) return false;
+  if (/^[+#\d\s().-]+$/.test(value)) return false;
+  return /[a-zA-Z]{2}/.test(value);
+}
+
+async function updateContactName(apiBaseUrl, accountId, token, contactId, name) {
+  if (!contactId || !isUsefulContactName(name)) return;
+  try {
+    await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/${contactId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', api_access_token: token },
+      body: JSON.stringify({ name: String(name).trim() })
+    });
+  } catch (_) { /* a cosmetic contact update must not block delivery */ }
+}
+
 /**
  * Find an existing contact (by phone first, then email) or create one.
  * Handles Chatwoot's 422 "phone/email already taken" by reusing the existing
@@ -300,7 +367,10 @@ async function findExistingContactId(apiBaseUrl, accountId, token, { email, phon
  */
 export async function resolveContactId({ apiBaseUrl, accountId, token, inboxId, name, phone, email, sourceId }) {
   let id = await findExistingContactId(apiBaseUrl, accountId, token, { phone, sourceId });
-  if (id) return id;
+  if (id) {
+    await updateContactName(apiBaseUrl, accountId, token, id, name);
+    return id;
+  }
 
   const create = async (withEmail) => {
     const body = { inbox_id: inboxId, name, phone_number: phone };
@@ -320,15 +390,64 @@ export async function resolveContactId({ apiBaseUrl, accountId, token, inboxId, 
   if (r.status === 422) {
     // Already exists (phone or email) — find and reuse it
     id = await findExistingContactId(apiBaseUrl, accountId, token, { phone, sourceId, email });
-    if (id) return id;
+    if (id) {
+      await updateContactName(apiBaseUrl, accountId, token, id, name);
+      return id;
+    }
     // Email belongs to a different contact — create with phone only
     ({ r, b } = await create(false));
     if (r.ok) return b.payload?.contact?.id || b.id || b.contact?.id;
     id = await findExistingContactId(apiBaseUrl, accountId, token, { phone, sourceId });
-    if (id) return id;
+    if (id) {
+      await updateContactName(apiBaseUrl, accountId, token, id, name);
+      return id;
+    }
   }
 
   throw new Error(`Could not find or create contact (HTTP ${r.status}${b?.message ? ': ' + b.message : ''})`);
+}
+
+/**
+ * Reuse the latest open/pending conversation for this contact and inbox.
+ * A new conversation is created only when no reusable conversation exists.
+ */
+export async function resolveConversationId({ apiBaseUrl, accountId, token, inboxId, contactId, sourceId, settings }) {
+  const listUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/${contactId}/conversations`;
+  try {
+    const listRes = await fetch(listUrl, { headers: { api_access_token: token } });
+    if (listRes.ok) {
+      const body = await listRes.json();
+      const conversations = Array.isArray(body) ? body : (body.payload || []);
+      const reusable = conversations
+        .filter(conversation =>
+          Number(conversation.inbox_id) === Number(inboxId)
+          && ['open', 'pending'].includes(conversation.status)
+        )
+        .sort((a, b) => {
+          const aMessage = a.last_non_activity_message;
+          const bMessage = b.last_non_activity_message;
+          const aHealthy = aMessage && aMessage.status !== 'failed' && String(aMessage.content || '').trim() !== 'Template:';
+          const bHealthy = bMessage && bMessage.status !== 'failed' && String(bMessage.content || '').trim() !== 'Template:';
+          if (aHealthy !== bHealthy) return bHealthy ? 1 : -1;
+          const aTime = Number(aMessage?.created_at || a.last_activity_at || a.created_at || 0);
+          const bTime = Number(bMessage?.created_at || b.last_activity_at || b.created_at || 0);
+          return bTime - aTime;
+        })[0];
+      if (reusable?.id) return { id: reusable.id, reused: true };
+    }
+  } catch (_) { /* fall through to conversation creation */ }
+
+  const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations`;
+  const body = buildConversationBody({ contactId, inboxId, sourceId, settings });
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', api_access_token: token },
+    body: JSON.stringify(body)
+  });
+  const responseBody = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`Create conversation failed: ${response.status} ${JSON.stringify(responseBody)}`);
+  if (!responseBody.id) throw new Error('No conversation ID returned');
+  return { id: responseBody.id, reused: false, response: responseBody };
 }
 
 // ─── Single Node Executor ─────────────────────────────────────────────────
@@ -531,12 +650,15 @@ export async function sendWhatsAppTemplate(nodeData, context, settings, step, de
   let contactId = context._contactId;
   let conversationId = context._conversationId;
 
-  if (dedupeKey && !(await claimNotification(dedupeKey))) {
-    step.response = { note: 'Skipped — already sent for this order' };
-    return { ok: true, skipped: true, response: step.response };
-  }
-
   try {
+    if (!apiBaseUrl || !token) throw new Error('Chatwoot API not configured in Settings');
+    const template = await requireApprovedTemplate(settings, templateName);
+
+    if (dedupeKey && !(await claimNotification(dedupeKey))) {
+      step.response = { note: 'Skipped — already sent for this order' };
+      return { ok: true, skipped: true, response: step.response };
+    }
+
     if (!contactId) {
       step.request = { method: 'resolveContactId', name: context.fullName, phone: context.phone, email: context.email };
       contactId = await resolveContactId({
@@ -548,14 +670,11 @@ export async function sendWhatsAppTemplate(nodeData, context, settings, step, de
     }
 
     if (!conversationId) {
-      // Create conversation
-      const convUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations`;
-      const convBody = buildConversationBody({ contactId, inboxId, sourceId: context.sourceId, settings });
-      const convRes = await fetch(convUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', api_access_token: token }, body: JSON.stringify(convBody) });
-      const convResBody = await convRes.json();
-      if (!convRes.ok) throw new Error(`Create Conversation failed: ${convRes.status}`);
-      conversationId = convResBody.id;
-      if (!conversationId) throw new Error('No conversation ID returned');
+      const conversation = await resolveConversationId({
+        apiBaseUrl, accountId, token, inboxId, contactId,
+        sourceId: context.sourceId, settings
+      });
+      conversationId = conversation.id;
       context._conversationId = conversationId;
     }
 
@@ -584,14 +703,13 @@ export async function sendWhatsAppTemplate(nodeData, context, settings, step, de
       });
     }
 
-    assertParamsComplete(processedParamsBody);
+    assertParamsComplete(processedParamsBody, template.bodyParamCount);
 
     // ── Build button params ──────────────────────────────────────────────
-    const templateButtons = await getTemplateButtons(settings, templateName);
-    const processedParamsButtons = buildTemplateButtonParams(templateButtons, context, richMapping);
+    const processedParamsButtons = buildTemplateButtonParams(template.buttons, context, richMapping);
 
-    const templateBody = await getTemplateBody(settings, templateName);
-    const content = renderTemplateBody(templateBody, processedParamsBody) || `Template: ${templateName}`;
+    const content = renderTemplateBody(template.body, processedParamsBody);
+    if (!content) throw new Error(`WhatsApp template "${template.name}" has no body content — not sending`);
 
     const processedParams = { body: processedParamsBody };
     if (processedParamsButtons) processedParams.buttons = processedParamsButtons;
@@ -601,9 +719,9 @@ export async function sendWhatsAppTemplate(nodeData, context, settings, step, de
       message_type: 'outgoing',
       content,
       template_params: {
-        name: templateName,
-        category: 'MARKETING',
-        language: 'en',
+        name: template.name,
+        category: template.category,
+        language: template.language,
         processed_params: processedParams
       }
     };
@@ -744,6 +862,7 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
     let orderDetails = null;
     let contactId = null;
     let conversationId = null;
+    let template = null;
 
     orderDetails = await runStep('Extract Details', async (step) => {
       step.request = { body: rawBody, topic: detectedTopic };
@@ -757,6 +876,18 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
       return { status: 'success', orderDetails: context, steps, skipped: true, skipReason: 'no_phone' };
     }
 
+    template = await runStep('Validate WhatsApp Template', async (step) => {
+      if (!apiBaseUrl || !token) throw new Error('Chatwoot API not configured in Settings');
+      const definition = await requireApprovedTemplate(settings, templateName);
+      step.response = {
+        template: definition.name,
+        status: definition.status,
+        bodyParameters: definition.bodyParamCount,
+        dynamicButtons: definition.buttons.length
+      };
+      return definition;
+    });
+
     const claimed = await runStep('Idempotency Check', async (step) => {
       const ok = await claimNotification(dedupeKey);
       step.response = { dedupeKey, claimed: ok, note: ok ? 'Proceeding — first attempt for this order' : 'Skipped — a message was already sent for this order' };
@@ -767,44 +898,27 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
       return { status: 'success', orderDetails: context, steps, skipped: true };
     }
 
-    const searchResult = await runStep('Search Contact', async (step) => {
-      if (!context.phone) { step.response = { note: 'No phone, skipping' }; return []; }
-      const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(context.phone)}`;
-      step.request = { url, method: 'GET' };
-      const res = await fetch(url, { headers: { api_access_token: token } });
-      const body = await res.json();
-      step.response = { status: res.status, body };
-      if (!res.ok) throw new Error(`Search failed: ${res.status}`);
-      return body;
+    contactId = await runStep('Resolve Contact', async (step) => {
+      step.request = { method: 'resolveContactId', name: context.fullName, phone: context.phone, email: context.email };
+      const resolvedId = await resolveContactId({
+        apiBaseUrl, accountId, token, inboxId,
+        name: context.fullName, phone: context.phone, email: context.email, sourceId: context.sourceId
+      });
+      if (!resolvedId) throw new Error('No contact ID returned');
+      step.response = { note: `Resolved contact ID: ${resolvedId}` };
+      return resolvedId;
     });
 
-    await runStep('Verify/Create Contact', async (step) => {
-      const contacts = Array.isArray(searchResult) ? searchResult : (searchResult.payload || []);
-      if (contacts.length > 0) {
-        contactId = contacts[0].id;
-        step.response = { note: `Reusing contact ID: ${contactId}`, body: contacts[0] };
-      } else {
-        step.request = { method: 'resolveContactId', name: context.fullName, phone: context.phone, email: context.email };
-        contactId = await resolveContactId({
-          apiBaseUrl, accountId, token, inboxId,
-          name: context.fullName, phone: context.phone, email: context.email, sourceId: context.sourceId
-        });
-        if (!contactId) throw new Error('No contact ID returned');
-        step.response = { note: `Resolved contact ID: ${contactId}` };
-      }
-      return contactId;
-    });
-
-    conversationId = await runStep('Create Conversation', async (step) => {
-      const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations`;
-      const body = buildConversationBody({ contactId, inboxId, sourceId: context.sourceId, settings });
-      step.request = { url, method: 'POST', body };
-      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', api_access_token: token }, body: JSON.stringify(body) });
-      const resBody = await res.json();
-      step.response = { status: res.status, body: resBody };
-      if (!res.ok) throw new Error(`Create Conversation failed: ${res.status}`);
-      if (!resBody.id) throw new Error('No conversation ID returned');
-      return resBody.id;
+    conversationId = await runStep('Resolve Conversation', async (step) => {
+      const conversation = await resolveConversationId({
+        apiBaseUrl, accountId, token, inboxId, contactId,
+        sourceId: context.sourceId, settings
+      });
+      step.response = {
+        conversationId: conversation.id,
+        note: conversation.reused ? 'Reused existing open conversation' : 'Created new conversation'
+      };
+      return conversation.id;
     });
 
     const sendResult = await runStep('Send WhatsApp Template', async (step) => {
@@ -817,25 +931,24 @@ export async function executePipeline(shopifyPayload, topic = 'orders/create') {
         processedParamsBody[String(i + 1)] = val;
       });
 
-      assertParamsComplete(processedParamsBody);
+      assertParamsComplete(processedParamsBody, template.bodyParamCount);
 
       // Build button params — supply the checkout/order URL for dynamic-URL buttons
-      const templateButtons = await getTemplateButtons(settings, templateName);
-      const processedParamsButtons = buildTemplateButtonParams(templateButtons, context);
+      const processedParamsButtons = buildTemplateButtonParams(template.buttons, context);
 
       const processedParams = { body: processedParamsBody };
       if (processedParamsButtons) processedParams.buttons = processedParamsButtons;
 
-      const templateBody = await getTemplateBody(settings, templateName);
-      const content = renderTemplateBody(templateBody, processedParamsBody) || `Template: ${templateName}`;
+      const content = renderTemplateBody(template.body, processedParamsBody);
+      if (!content) throw new Error(`WhatsApp template "${template.name}" has no body content — not sending`);
       const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
       const body = {
         message_type: 'outgoing',
         content,
         template_params: {
-          name: templateName,
-          category: 'MARKETING',
-          language: 'en',
+          name: template.name,
+          category: template.category,
+          language: template.language,
           processed_params: processedParams
         }
       };

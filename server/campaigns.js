@@ -8,12 +8,13 @@ import {
   finalizeCampaignIfDone,
   logCampaignMessage,
   logTransaction,
+  setTransactionChatwootMessageId,
   getWebhookDripCampaigns,
   enrollCampaignRecipient
 } from './db.js';
 import {
-  normalizePhone, getTemplateBody, getTemplateButtons, renderTemplateBody,
-  resolveContactId, buildConversationBody, buildTemplateButtonParams
+  normalizePhone, renderTemplateBody, resolveContactId, resolveConversationId,
+  buildTemplateButtonParams, requireApprovedTemplate, assertParamsComplete
 } from './chatwoot.js';
 import { checkShopifyOrder, normalizeShop } from './shopify.js';
 
@@ -216,6 +217,9 @@ async function sendOne(recipient, settings) {
         result.step
       ], error_message: null
     });
+    if (result.chatwootMessageId) {
+      await setTransactionChatwootMessageId(txId, result.chatwootMessageId);
+    }
     console.log(`[Campaign] Sent step ${stepIndex + 1}/${steps.length} to ${recipient.phone} (campaign ${campaignId})`);
   } catch (err) {
     await markRecipientStatus(recipient.id, 'failed', err.message);
@@ -249,7 +253,8 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
   const inboxId = parseInt(settings.CHATWOOT_INBOX_ID || '1', 10);
 
   if (!apiBaseUrl || !token) throw new Error('Chatwoot API not configured in Settings');
-  if (!templateName) throw new Error('No WhatsApp template name configured');
+  const template = await requireApprovedTemplate(settings, templateName);
+  assertParamsComplete(processedParams || {}, template.bodyParamCount);
 
   const { sourceId } = normalizePhone(phone, '');
 
@@ -258,28 +263,20 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
   const contactId = await resolveContactId({ apiBaseUrl, accountId, token, inboxId, name, phone, email, sourceId });
   if (!contactId) throw new Error('Could not find or create contact');
 
-  // 2. Open a conversation
-  const convUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations`;
-  const convBody = buildConversationBody({ contactId, inboxId, sourceId, settings });
-  const convRes = await fetch(convUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', api_access_token: token },
-    body: JSON.stringify(convBody)
+  // 2. Reuse the latest open conversation instead of creating duplicates.
+  const conversation = await resolveConversationId({
+    apiBaseUrl, accountId, token, inboxId, contactId, sourceId, settings
   });
-  const convResBody = await convRes.json();
-  if (!convRes.ok) throw new Error(`Create conversation failed: ${convRes.status}`);
-  const conversationId = convResBody.id;
-  if (!conversationId) throw new Error('No conversation ID returned');
+  const conversationId = conversation.id;
 
   // 3. Send the template message — render the real template body so the
   //    message reads exactly like the approved template.
-  const templateBody = await getTemplateBody(settings, templateName);
-  const content = renderTemplateBody(templateBody, processedParams) || `Template: ${templateName}`;
+  const content = renderTemplateBody(template.body, processedParams);
+  if (!content) throw new Error(`WhatsApp template "${template.name}" has no body content — not sending`);
 
   // Build button params — if the template has dynamic-URL buttons, supply the URL
   // from processedParams or a sensible fallback.
-  const templateButtons = await getTemplateButtons(settings, templateName);
-  const processedParamsButtons = buildTemplateButtonParams(templateButtons, {
+  const processedParamsButtons = buildTemplateButtonParams(template.buttons, {
     abandonedCheckoutUrl: processedParams?.checkoutUrl || processedParams?.url
   });
 
@@ -291,9 +288,9 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
     message_type: 'outgoing',
     content,
     template_params: {
-      name: templateName,
-      category: category || 'MARKETING',
-      language: language || 'en',
+      name: template.name,
+      category: template.category || category || 'MARKETING',
+      language: template.language || language || 'en',
       processed_params: finalProcessedParams
     }
   };
@@ -312,7 +309,7 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
     step: {
       name: 'Send WhatsApp Template',
       status: 'success',
-      request: { url: msgUrl, body: msgBody },
+      request: { url: msgUrl, body: msgBody, conversationReused: conversation.reused },
       response: { status: msgRes.status, body: msgResBody }
     }
   };
