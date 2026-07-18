@@ -1,0 +1,12 @@
+[mcp_servers.insforge]
+command = "cmd"
+args = [
+    "/c",
+    "npx",
+    "-y",
+    "@insforge/mcp@latest",
+]
+
+[mcp_servers.insforge.env]
+API_KEY = "ik_0c59cf862fe4cbe804b7b9cc01c95c37"
+API_BASE_URL = "https://d6yqray7.us-east.insforge.app"
