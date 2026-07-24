@@ -121,7 +121,8 @@ function parseCSV(text: string): { headers: string[]; rows: Record<string, strin
 
 function statusBadge(s: string) {
   const cls: Record<string, string> = {
-    completed: 'success', sent: 'success', running: 'processing',
+    completed: 'success', delivered: 'success', read: 'success',
+    sent: 'processing', accepted: 'processing', running: 'processing',
     pending: 'pending', paused: 'delayed', draft: 'pending', failed: 'failed', skipped: 'delayed',
     enrolled: 'success', filtered: 'delayed'
   };
@@ -223,7 +224,7 @@ function CampaignList({ kind, onNew, onOpen }: { kind: CampaignKind; onNew: () =
                             <div style={{ width: `${pct}%`, height: '100%', background: 'var(--green)' }} />
                           </div>
                           <span className="text-dim text-sm" style={{ whiteSpace: 'nowrap' }}>
-                            {c.sent} sent {c.skipped > 0 ? `· ${c.skipped} stopped ` : ''}{c.failed > 0 ? `· ${c.failed} failed ` : ''}/ {c.total}
+                            {c.sent} delivered {c.skipped > 0 ? `· ${c.skipped} stopped ` : ''}{c.failed > 0 ? `· ${c.failed} failed ` : ''}/ {c.total}
                           </span>
                         </div>
                       </td>
@@ -937,7 +938,7 @@ function CampaignDetailView({ id, kind, onBack }: { id: string; kind: CampaignKi
           <div style={{ flex: 1, height: 8, background: 'var(--bg-hover)', borderRadius: 4, overflow: 'hidden' }}>
             <div style={{ width: `${pct}%`, height: '100%', background: 'var(--green)' }} />
           </div>
-          <span className="text-sm">{c.sent} completed {kind === 'drip' ? `· ${c.skipped || 0} stopped ` : ''}· {c.failed} failed · {c.total} total</span>
+          <span className="text-sm">{c.sent} delivered {kind === 'drip' ? `· ${c.skipped || 0} stopped ` : ''}· {c.failed} failed · {c.total} total</span>
         </div>
       </div>
 

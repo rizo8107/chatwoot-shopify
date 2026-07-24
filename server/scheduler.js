@@ -1,11 +1,12 @@
 import { getPendingJobs, markJobStatus, getFlowById, logTransaction, getTransactionById } from './db.js';
 import { executeFlowNode } from './chatwoot.js';
-import { processDueCampaignMessages } from './campaigns.js';
+import { processDueCampaignMessages, reconcileCampaignDeliveryStatuses } from './campaigns.js';
 import { processDueRetries } from './retries.js';
 import { processDueRecoveryJobs } from './recovery.js';
 
 let schedulerTimer = null;
 let campaignTimer = null;
+let campaignDeliveryTimer = null;
 let retryTimer = null;
 let recoveryTimer = null;
 
@@ -20,6 +21,12 @@ export function startScheduler() {
       processDueCampaignMessages().catch(err => console.error('[Scheduler] Campaign tick error:', err.message));
     }, 5_000);
     processDueCampaignMessages().catch(err => console.error('[Scheduler] Campaign initial run error:', err.message));
+  }
+  if (!campaignDeliveryTimer) {
+    campaignDeliveryTimer = setInterval(() => {
+      reconcileCampaignDeliveryStatuses().catch(err => console.error('[Scheduler] Campaign delivery reconciliation error:', err.message));
+    }, 30_000);
+    reconcileCampaignDeliveryStatuses().catch(err => console.error('[Scheduler] Initial campaign delivery reconciliation error:', err.message));
   }
   if (!retryTimer) {
     retryTimer = setInterval(() => {
@@ -39,6 +46,7 @@ export function startScheduler() {
 export function stopScheduler() {
   if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
   if (campaignTimer) { clearInterval(campaignTimer); campaignTimer = null; }
+  if (campaignDeliveryTimer) { clearInterval(campaignDeliveryTimer); campaignDeliveryTimer = null; }
   if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
   if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null; }
   console.log('[Scheduler] Stopped');

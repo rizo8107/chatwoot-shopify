@@ -2,15 +2,16 @@ import crypto from 'node:crypto';
 import {
   getAllSettings,
   getDueCampaignRecipients,
+  getPendingCampaignDeliveries,
   markRecipientStatus,
-  advanceCampaignRecipient,
   incrementCampaignCounter,
   finalizeCampaignIfDone,
   logCampaignMessage,
   logTransaction,
   setTransactionChatwootMessageId,
   getWebhookDripCampaigns,
-  enrollCampaignRecipient
+  enrollCampaignRecipient,
+  updateDeliveryStatusByMessageId
 } from './db.js';
 import {
   normalizePhone, renderTemplateBody, resolveContactId, resolveConversationId,
@@ -20,6 +21,7 @@ import {
 import { checkShopifyOrder, normalizeShop } from './shopify.js';
 
 let processing = false;
+let reconcilingDeliveries = false;
 
 function contextValue(context, field) {
   return String(field || '').split('.').reduce((value, part) => value?.[part], context);
@@ -115,6 +117,59 @@ export async function processDueCampaignMessages() {
   }
 }
 
+/** Poll Chatwoot as a fallback when a message_updated webhook is delayed or missed. */
+export async function reconcileCampaignDeliveryStatuses({
+  getPending = getPendingCampaignDeliveries,
+  getSettings = getAllSettings,
+  updateStatus = updateDeliveryStatusByMessageId
+} = {}) {
+  if (reconcilingDeliveries) return;
+  reconcilingDeliveries = true;
+  try {
+    const pending = await getPending(100);
+    if (pending.length === 0) return;
+    const settings = await getSettings();
+    const apiBaseUrl = String(settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
+    const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
+    const token = settings.CHATWOOT_API_TOKEN;
+    if (!apiBaseUrl || !token) return;
+
+    const byConversation = new Map();
+    for (const item of pending) {
+      if (!item.conversation_id) continue;
+      const key = String(item.conversation_id);
+      if (!byConversation.has(key)) byConversation.set(key, []);
+      byConversation.get(key).push(item);
+    }
+
+    for (const [conversationId, items] of byConversation) {
+      try {
+        const response = await fetch(
+          `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`,
+          { headers: { api_access_token: token } }
+        );
+        if (!response.ok) continue;
+        const body = await response.json();
+        const messages = Array.isArray(body) ? body : (body.payload || []);
+        const messagesById = new Map(messages.map(message => [String(message.id), message]));
+        for (const item of items) {
+          const message = messagesById.get(String(item.chatwoot_message_id));
+          if (!message || !['sent', 'delivered', 'read', 'failed'].includes(message.status)) continue;
+          const error = message.content_attributes?.external_error
+            || message.content_attributes?.external_error_message
+            || message.external_error
+            || null;
+          await updateStatus(message.id, message.status, error);
+        }
+      } catch (error) {
+        console.warn(`[Campaign] Delivery reconciliation failed for conversation ${conversationId}: ${error.message}`);
+      }
+    }
+  } finally {
+    reconcilingDeliveries = false;
+  }
+}
+
 async function sendOne(recipient, settings) {
   const legacyVariables = typeof recipient.variables === 'string'
     ? JSON.parse(recipient.variables || '{}')
@@ -200,34 +255,33 @@ async function sendOne(recipient, settings) {
     });
 
     const hasNextStep = stepIndex + 1 < steps.length;
-    if (hasNextStep) {
-      const next = steps[stepIndex + 1];
-      const amount = Math.max(0, Number(next.delay_value || 0));
-      const multiplier = next.delay_unit === 'days' ? 86400000 : next.delay_unit === 'hours' ? 3600000 : 60000;
-      await advanceCampaignRecipient(recipient.id, stepIndex + 1, new Date(Date.now() + amount * multiplier).toISOString(), shopifyCheck?.status || null);
-    } else {
-      await markRecipientStatus(recipient.id, 'sent', null);
-      await incrementCampaignCounter(campaignId, 'sent');
-    }
+    await markRecipientStatus(recipient.id, 'accepted', null);
     await logCampaignMessage({
       id: logId, campaign_id: campaignId, recipient_id: recipient.id,
       step_index: stepIndex, template_name: campaignStep.template_name || recipient.template_name,
-      status: 'sent', shopify_status: shopifyCheck?.status,
+      status: 'accepted', shopify_status: shopifyCheck?.status,
       chatwoot_message_id: result.chatwootMessageId,
       details: { contactId: result.contactId, conversationId: result.conversationId, nextStep: hasNextStep ? stepIndex + 1 : null }
     });
     await logTransaction({
       id: txId, flow_id: null,
       order_number: recipient.order_reference || bodyVariables['1'] || null, customer_name: recipient.name, phone_number: recipient.phone,
-      status: 'success', type: 'campaign', steps: [
+      status: 'processing', type: 'campaign', steps: [
         ...(shopifyCheck ? [{ name: 'Shopify Order Cross-check', status: 'success', response: shopifyCheck }] : []),
         result.step
       ], error_message: null
     });
     if (result.chatwootMessageId) {
       await setTransactionChatwootMessageId(txId, result.chatwootMessageId);
+      if (['sent', 'delivered', 'read', 'failed'].includes(result.messageStatus)) {
+        await updateDeliveryStatusByMessageId(
+          result.chatwootMessageId,
+          result.messageStatus,
+          result.deliveryError
+        );
+      }
     }
-    console.log(`[Campaign] Sent step ${stepIndex + 1}/${steps.length} to ${recipient.phone} (campaign ${campaignId})`);
+    console.log(`[Campaign] Chatwoot accepted step ${stepIndex + 1}/${steps.length} for ${recipient.phone} (campaign ${campaignId})`);
   } catch (err) {
     await markRecipientStatus(recipient.id, 'failed', err.message);
     await incrementCampaignCounter(campaignId, 'failed');
@@ -329,6 +383,11 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
     contactId,
     conversationId,
     chatwootMessageId: msgResBody.id || msgResBody.message?.id || null,
+    messageStatus: msgResBody.status || msgResBody.message?.status || 'sent',
+    deliveryError: msgResBody.content_attributes?.external_error
+      || msgResBody.content_attributes?.external_error_message
+      || msgResBody.external_error
+      || null,
     step: {
       name: 'Send WhatsApp Template',
       status: 'success',

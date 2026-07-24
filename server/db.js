@@ -372,6 +372,7 @@ export async function setTransactionChatwootMessageId(id, chatwootMessageId) {
   const pending = await get(`SELECT status, error_message FROM pending_delivery_updates WHERE chatwoot_message_id = ?`, [messageId]);
   if (pending) {
     await applyDeliveryStatus(messageId, pending.status, pending.error_message);
+    await applyCampaignDeliveryStatus(messageId, pending.status, pending.error_message);
     await run(`DELETE FROM pending_delivery_updates WHERE chatwoot_message_id = ?`, [messageId]);
   } else {
     await applyDeliveryStatus(messageId, 'sent');
@@ -387,8 +388,13 @@ async function applyDeliveryStatus(chatwootMessageId, status, errorMessage = nul
 
   const sets = ['delivery_status = ?'];
   const params = [status];
+  if (status === 'sent') sets.push(`status = 'processing'`);
   if (status === 'delivered') { sets.push('delivered_at = ?'); params.push(new Date().toISOString()); }
   if (status === 'read') { sets.push('read_at = ?'); params.push(new Date().toISOString()); }
+  if (status === 'delivered' || status === 'read') {
+    sets.push(`status = 'success'`);
+    sets.push('error_message = NULL');
+  }
   if (status === 'failed') {
     sets.push(`status = 'failed'`);
     sets.push('error_message = COALESCE(?, error_message)');
@@ -399,6 +405,84 @@ async function applyDeliveryStatus(chatwootMessageId, status, errorMessage = nul
   return res.changes > 0;
 }
 
+const CAMPAIGN_DELIVERY_RANK = { accepted: 0, sent: 1, delivered: 2, read: 3, failed: 4 };
+
+async function applyCampaignDeliveryStatus(chatwootMessageId, status, errorMessage = null) {
+  const row = await get(
+    `SELECT cml.id AS log_id, cml.status AS log_status, cml.step_index,
+            cr.id AS recipient_id, cr.status AS recipient_status, cr.current_step,
+            c.id AS campaign_id, c.steps, c.enrollment_source
+     FROM campaign_message_logs cml
+     JOIN campaign_recipients cr ON cr.id = cml.recipient_id
+     JOIN campaigns c ON c.id = cml.campaign_id
+     WHERE cml.chatwoot_message_id = ?`,
+    [String(chatwootMessageId)]
+  );
+  if (!row) return false;
+  if ((CAMPAIGN_DELIVERY_RANK[row.log_status] || 0) > (CAMPAIGN_DELIVERY_RANK[status] || 0)) return true;
+
+  await run(
+    `UPDATE campaign_message_logs SET status = ?, error_message = ? WHERE id = ?`,
+    [status, status === 'failed' ? (errorMessage || 'WhatsApp delivery failed after Chatwoot accepted the message') : null, row.log_id]
+  );
+
+  const wasSuccessful = ['sent', 'delivered', 'read'].includes(row.recipient_status);
+  if (status === 'sent') {
+    // "sent" only means Chatwoot/provider accepted the message. It is not a
+    // confirmed WhatsApp delivery and must not count as campaign success.
+    if (row.recipient_status === 'sent') {
+      await run(`UPDATE campaigns SET sent = GREATEST(0, sent - 1), status = 'running' WHERE id = ?`, [row.campaign_id]);
+    }
+    if (['sent', 'accepted'].includes(row.recipient_status)) {
+      await run(
+        `UPDATE campaign_recipients SET status = 'accepted', error_message = NULL, sent_at = NULL WHERE id = ?`,
+        [row.recipient_id]
+      );
+    }
+  } else if (status === 'failed') {
+    if (wasSuccessful) {
+      await run(`UPDATE campaigns SET sent = GREATEST(0, sent - 1) WHERE id = ?`, [row.campaign_id]);
+    }
+    if (row.recipient_status !== 'failed') {
+      await run(`UPDATE campaigns SET failed = failed + 1 WHERE id = ?`, [row.campaign_id]);
+    }
+    await run(
+      `UPDATE campaign_recipients SET status = 'failed', error_message = ?, sent_at = NULL WHERE id = ?`,
+      [errorMessage || 'WhatsApp delivery failed after Chatwoot accepted the message', row.recipient_id]
+    );
+  } else if (status === 'delivered' || status === 'read') {
+    if (!['delivered', 'read'].includes(row.recipient_status)) {
+      if (row.recipient_status === 'sent') {
+        await run(`UPDATE campaigns SET sent = GREATEST(0, sent - 1) WHERE id = ?`, [row.campaign_id]);
+      }
+      const steps = JSON.parse(row.steps || '[]');
+      const hasNextStep = Number(row.step_index) + 1 < steps.length;
+      if (hasNextStep) {
+        const next = steps[Number(row.step_index) + 1] || {};
+        const amount = Math.max(0, Number(next.delay_value || 0));
+        const multiplier = next.delay_unit === 'days' ? 86400000 : next.delay_unit === 'hours' ? 3600000 : 60000;
+        await run(
+          `UPDATE campaign_recipients
+           SET status = 'pending', current_step = ?, run_at = ?, error_message = NULL, sent_at = NULL
+           WHERE id = ?`,
+          [Number(row.step_index) + 1, new Date(Date.now() + amount * multiplier).toISOString(), row.recipient_id]
+        );
+      } else {
+        await run(
+          `UPDATE campaign_recipients SET status = ?, error_message = NULL, sent_at = ? WHERE id = ?`,
+          [status, new Date().toISOString(), row.recipient_id]
+        );
+        await run(`UPDATE campaigns SET sent = sent + 1 WHERE id = ?`, [row.campaign_id]);
+      }
+    } else if (status === 'read' && row.recipient_status === 'delivered') {
+      await run(`UPDATE campaign_recipients SET status = 'read' WHERE id = ?`, [row.recipient_id]);
+    }
+  }
+
+  await finalizeCampaignIfDone(row.campaign_id);
+  return true;
+}
+
 /**
  * Update delivery state even when Chatwoot's webhook beats the sender's DB
  * update. Early events are retained and applied when the message ID is linked.
@@ -406,7 +490,9 @@ async function applyDeliveryStatus(chatwootMessageId, status, errorMessage = nul
 export async function updateDeliveryStatusByMessageId(chatwootMessageId, status, errorMessage = null) {
   const messageId = String(chatwootMessageId || '');
   if (!messageId || !DELIVERY_RANK[status]) return false;
-  if (await applyDeliveryStatus(messageId, status, errorMessage)) return true;
+  const campaignApplied = await applyCampaignDeliveryStatus(messageId, status, errorMessage);
+  const transactionApplied = await applyDeliveryStatus(messageId, status, errorMessage);
+  if (campaignApplied || transactionApplied) return true;
 
   const existing = await get(`SELECT status FROM pending_delivery_updates WHERE chatwoot_message_id = ?`, [messageId]);
   if (!existing || (DELIVERY_RANK[status] || 0) >= (DELIVERY_RANK[existing.status] || 0)) {
@@ -421,6 +507,28 @@ export async function updateDeliveryStatusByMessageId(chatwootMessageId, status,
     );
   }
   return false;
+}
+
+export async function getPendingCampaignDeliveries(limit = 100) {
+  const rows = await all(
+    `SELECT cml.chatwoot_message_id, cml.details
+     FROM campaign_message_logs cml
+     JOIN campaign_recipients cr ON cr.id = cml.recipient_id
+     WHERE cml.chatwoot_message_id IS NOT NULL
+       AND cml.status IN ('accepted', 'sent')
+       AND cr.status IN ('accepted', 'sent')
+     ORDER BY cml.created_at ASC
+     LIMIT ?`,
+    [limit]
+  );
+  return rows.map(row => {
+    let details = {};
+    try { details = JSON.parse(row.details || '{}'); } catch (_) {}
+    return {
+      chatwoot_message_id: String(row.chatwoot_message_id),
+      conversation_id: details.conversationId || null
+    };
+  });
 }
 
 // ─── Notification Idempotency ──────────────────────────────────────────────
@@ -691,7 +799,7 @@ export async function getDueCampaignRecipients(limit = 20) {
 export async function markRecipientStatus(id, status, error_message = null) {
   await run(
     `UPDATE campaign_recipients SET status = ?, error_message = ?, sent_at = ? WHERE id = ?`,
-    [status, error_message || null, ['sent', 'skipped'].includes(status) ? new Date().toISOString() : null, id]
+    [status, error_message || null, ['sent', 'delivered', 'read', 'skipped'].includes(status) ? new Date().toISOString() : null, id]
   );
 }
 
@@ -751,7 +859,8 @@ export async function incrementCampaignCounter(id, field) {
 export async function finalizeCampaignIfDone(id) {
   const row = await get(
     `SELECT c.enrollment_source,
-       (SELECT COUNT(*) FROM campaign_recipients cr WHERE cr.campaign_id = c.id AND cr.status = 'pending') AS pending
+       (SELECT COUNT(*) FROM campaign_recipients cr
+        WHERE cr.campaign_id = c.id AND cr.status IN ('pending', 'accepted', 'sent')) AS pending
      FROM campaigns c WHERE c.id = ?`,
     [id]
   );
