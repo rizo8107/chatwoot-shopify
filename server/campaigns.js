@@ -14,7 +14,8 @@ import {
 } from './db.js';
 import {
   normalizePhone, renderTemplateBody, resolveContactId, resolveConversationId,
-  buildTemplateButtonParams, buildTemplateHeaderParams, requireApprovedTemplate, assertParamsComplete
+  resolveContactByUniqueExactName, buildTemplateButtonParams, buildTemplateHeaderParams,
+  requireApprovedTemplate, assertParamsComplete
 } from './chatwoot.js';
 import { checkShopifyOrder, normalizeShop } from './shopify.js';
 
@@ -262,11 +263,25 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
   const template = await requireApprovedTemplate(settings, templateName);
   assertParamsComplete(processedParams || {}, template.bodyParamCount);
 
-  const { sourceId } = normalizePhone(phone, '');
+  const normalizedPhone = normalizePhone(phone, '');
+  let sourceId = normalizedPhone.sourceId;
 
   // 1. Find or create contact — reuses an existing contact (by phone or email),
   //    so already-existing contacts are messaged, never skipped.
-  const contactId = await resolveContactId({ apiBaseUrl, accountId, token, inboxId, name, phone, email, sourceId });
+  let contactId;
+  if (!normalizedPhone.formattedPhone) {
+    const recovered = await resolveContactByUniqueExactName(apiBaseUrl, accountId, token, inboxId, name);
+    if (!recovered) {
+      const reason = normalizedPhone.invalidReason === 'scientific_notation'
+        ? 'Phone number was converted to scientific notation by Excel. Format the phone column as Text and upload the CSV again.'
+        : 'Phone number is invalid. Use 10–15 digits including the country code.';
+      throw new Error(reason);
+    }
+    contactId = recovered.id;
+    sourceId = recovered.sourceId;
+  } else {
+    contactId = await resolveContactId({ apiBaseUrl, accountId, token, inboxId, name, phone, email, sourceId });
+  }
   if (!contactId) throw new Error('Could not find or create contact');
 
   // 2. Reuse the latest open conversation instead of creating duplicates.

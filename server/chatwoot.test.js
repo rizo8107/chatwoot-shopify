@@ -4,7 +4,9 @@ import {
   assertParamsComplete,
   buildTemplateButtonParams,
   buildTemplateHeaderParams,
+  normalizePhone,
   requireApprovedTemplate,
+  resolveContactByUniqueExactName,
   resolveContactId,
   resolveConversationId,
   sendWhatsAppTemplate
@@ -91,6 +93,51 @@ test('non-approved template fails closed', async () => {
 test('required body parameters cannot be omitted', () => {
   assert.throws(() => assertParamsComplete({}, 2), /\{\{1\}\}.*\{\{2\}\}/);
   assert.doesNotThrow(() => assertParamsComplete({ 1: 'A', 2: 'B' }, 2));
+});
+
+test('Excel scientific-notation phone numbers are rejected without losing digits silently', () => {
+  assert.deepEqual(
+    normalizePhone('9.19995E+11', ''),
+    { cleanPhone: '', formattedPhone: '', sourceId: '', invalidReason: 'scientific_notation' }
+  );
+  assert.deepEqual(
+    normalizePhone('+919994874789', ''),
+    { cleanPhone: '919994874789', formattedPhone: '+919994874789', sourceId: '919994874789', invalidReason: null }
+  );
+});
+
+test('a unique exact-name contact can recover its WhatsApp inbox source ID', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      payload: [{
+        id: 656,
+        name: 'chitradevi chitradevi',
+        phone_number: '',
+        contact_inboxes: [
+          { source_id: '1783304167444', inbox: { id: 1 } },
+          { source_id: '919994874789', inbox: { id: 1 } },
+          { source_id: 'IN.1557570669054718', inbox: { id: 1 } }
+        ]
+      }]
+    })
+  });
+  try {
+    assert.deepEqual(
+      await resolveContactByUniqueExactName(
+        baseSettings.CHATWOOT_API_URL,
+        '1',
+        'test-token',
+        1,
+        'chitradevi chitradevi'
+      ),
+      { id: 656, sourceId: '919994874789' }
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test('dynamic template buttons require a real mapped URL', () => {

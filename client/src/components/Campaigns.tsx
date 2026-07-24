@@ -410,6 +410,13 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
     if (!name.trim()) { setError('Enter a campaign name.'); return; }
     if (enrollmentSource === 'csv' && rows.length === 0) { setError('Upload or paste a CSV with at least one row.'); return; }
     if (enrollmentSource === 'csv' && !phoneCol) { setError('Select which column holds the phone number.'); return; }
+    if (enrollmentSource === 'csv') {
+      const scientificRow = rows.findIndex(row => /^[+-]?\d+(?:\.\d+)?e[+-]?\d+$/i.test(String(row[phoneCol] || '').trim()));
+      if (scientificRow >= 0) {
+        setError(`Row ${scientificRow + 1} has an Excel scientific-notation phone number. Format the phone column as Text and export the CSV again.`);
+        return;
+      }
+    }
     if (!templateName.trim()) { setError('Enter a WhatsApp template name (or set one in Settings).'); return; }
     if (mediaHeaderIsMissing(selectedHeader, headerMediaUrl, headerMediaColumn)) {
       setError(`Add the required ${selectedHeader?.format.toLowerCase()} header URL for the first template.`);

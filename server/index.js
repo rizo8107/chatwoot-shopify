@@ -1216,6 +1216,15 @@ app.post('/api/campaigns', async (req, res) => {
       return res.status(400).json({ error: 'Shopify cross-check requires an order number or email column' });
     }
     const safeRows = source === 'csv' && Array.isArray(rows) ? rows : [];
+    for (const [rowIndex, row] of safeRows.entries()) {
+      const normalizedPhone = normalizePhone(row?.[phone_column], '');
+      if (!normalizedPhone.formattedPhone) {
+        const message = normalizedPhone.invalidReason === 'scientific_notation'
+          ? `CSV row ${rowIndex + 1} has a phone number in Excel scientific notation. Format the phone column as Text and export the CSV again.`
+          : `CSV row ${rowIndex + 1} does not contain a valid phone number. Use 10–15 digits including the country code.`;
+        return res.status(400).json({ error: message });
+      }
+    }
     const recipients = safeRows.map((row, i) => {
       const { formattedPhone } = normalizePhone(row[phone_column], '');
       const variables = {};

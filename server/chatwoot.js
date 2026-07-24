@@ -122,14 +122,24 @@ export function extractCheckoutDetails(body) {
 }
 
 export function normalizePhone(phone, fallbackSourceId) {
-  let cleanPhone = String(phone || '').replace(/[\s\-().+]/g, '');
+  const rawPhone = String(phone || '').trim();
+  if (/^[+-]?\d+(?:\.\d+)?e[+-]?\d+$/i.test(rawPhone)) {
+    return { cleanPhone: '', formattedPhone: '', sourceId: '', invalidReason: 'scientific_notation' };
+  }
+  let cleanPhone = rawPhone.replace(/[\s\-().+]/g, '');
+  if (cleanPhone && !/^\d+$/.test(cleanPhone)) {
+    return { cleanPhone: '', formattedPhone: '', sourceId: '', invalidReason: 'invalid_characters' };
+  }
   if (cleanPhone.startsWith('0')) cleanPhone = '91' + cleanPhone.slice(1);
   else if (cleanPhone.length === 10) cleanPhone = '91' + cleanPhone;
+  if (cleanPhone && (cleanPhone.length < 10 || cleanPhone.length > 15)) {
+    return { cleanPhone: '', formattedPhone: '', sourceId: '', invalidReason: 'invalid_length' };
+  }
   // For WhatsApp inbox, sourceId must be numeric (1-15 digits) or business account format.
   // If no phone available, generate numeric ID from timestamp + random
   const sourceId = cleanPhone || (fallbackSourceId ? String(Date.now() % 999999999999999).slice(0, 15) : '');
   const formattedPhone = cleanPhone ? `+${cleanPhone}` : '';
-  return { cleanPhone, formattedPhone, sourceId };
+  return { cleanPhone, formattedPhone, sourceId, invalidReason: null };
 }
 
 // ─── WhatsApp template body + button info (so messages read like the real template) ───
@@ -377,6 +387,45 @@ async function findExistingContactId(apiBaseUrl, accountId, token, { email, phon
     if (id) return id;
   }
   return null;
+}
+
+function whatsappSourceIdForContact(contact, inboxId) {
+  const inboxSources = (contact?.contact_inboxes || [])
+    .filter(item => Number(item?.inbox?.id || item?.inbox_id) === Number(inboxId))
+    .map(item => String(item?.source_id || '').trim())
+    .filter(Boolean);
+  const uniqueSources = [...new Set(inboxSources)];
+  const phoneDigits = String(contact?.phone_number || '').replace(/\D/g, '');
+  if (phoneDigits && uniqueSources.includes(phoneDigits)) return phoneDigits;
+
+  // This installation uses Indian WhatsApp numbers. Chatwoot-generated numeric
+  // source IDs can coexist on old contacts, so only accept one unambiguous +91 ID.
+  const indianNumbers = uniqueSources.filter(value => /^91\d{10}$/.test(value));
+  if (indianNumbers.length === 1) return indianNumbers[0];
+
+  const numericSources = uniqueSources.filter(value => /^\d{10,15}$/.test(value));
+  return numericSources.length === 1 ? numericSources[0] : null;
+}
+
+export async function resolveContactByUniqueExactName(apiBaseUrl, accountId, token, inboxId, name) {
+  const normalizedName = String(name || '').trim().toLowerCase();
+  if (!isUsefulContactName(name)) return null;
+  try {
+    const r = await fetch(
+      `${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(String(name).trim())}`,
+      { headers: { api_access_token: token } }
+    );
+    if (!r.ok) return null;
+    const b = await r.json();
+    const list = Array.isArray(b) ? b : (b.payload || []);
+    const exactMatches = list.filter(contact => String(contact?.name || '').trim().toLowerCase() === normalizedName);
+    if (exactMatches.length !== 1) return null;
+    const contact = exactMatches[0];
+    const recoveredSourceId = whatsappSourceIdForContact(contact, inboxId);
+    return recoveredSourceId ? { id: contact.id, sourceId: recoveredSourceId } : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 async function filterContactByPhone(apiBaseUrl, accountId, token, phone) {
