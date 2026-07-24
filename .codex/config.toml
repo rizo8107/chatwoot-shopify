@@ -1,3 +1,5 @@
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
 [mcp_servers.insforge]
 command = "cmd"
 args = [
