@@ -26,6 +26,7 @@ interface CampaignSummary {
 interface DripStep {
   id: string; template_name: string; language: string; category: string;
   delay_value: number; delay_unit: 'minutes' | 'hours' | 'days'; param_mapping: string[];
+  header_media_url?: string; header_media_column?: string;
 }
 
 interface Recipient {
@@ -72,6 +73,10 @@ const WEBHOOK_EVENTS = [
 
 interface TemplateInfo {
   name: string; language: string; category: string; status: string; paramCount: number; body: string;
+  header?: {
+    required: boolean; format: 'IMAGE' | 'VIDEO' | 'DOCUMENT' | 'TEXT';
+    text?: string; exampleUrl?: string | null;
+  } | null;
 }
 
 type View = { kind: 'list' } | { kind: 'new' } | { kind: 'detail'; id: string };
@@ -267,6 +272,8 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
   const [phoneCol, setPhoneCol] = useState('');
   const [nameCol, setNameCol] = useState('');
   const [paramMapping, setParamMapping] = useState<string[]>(['', '']);
+  const [headerMediaUrl, setHeaderMediaUrl] = useState('');
+  const [headerMediaColumn, setHeaderMediaColumn] = useState('');
   const [followUps, setFollowUps] = useState<DripStep[]>([]);
   const [enrollmentSource, setEnrollmentSource] = useState<'csv' | 'webhook'>(kind === 'drip' ? 'webhook' : 'csv');
   const [triggerEvent, setTriggerEvent] = useState('orders/create');
@@ -309,6 +316,8 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
     setLanguage(t.language || 'en');
     setCategory((t.category || 'UTILITY').toUpperCase());
     setParamMapping(new Array(t.paramCount).fill(''));
+    setHeaderMediaUrl('');
+    setHeaderMediaColumn('');
   };
 
   const selectedBody = templates.find(t => t.name === selectedTemplate)?.body;
@@ -347,7 +356,8 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
   const addFollowUp = () => setFollowUps(current => [...current, {
     id: `step_${current.length + 2}`,
     template_name: '', language: 'en', category: 'MARKETING',
-    delay_value: 1, delay_unit: 'days', param_mapping: []
+    delay_value: 1, delay_unit: 'days', param_mapping: [],
+    header_media_url: '', header_media_column: ''
   }]);
 
   const updateFollowUp = (index: number, patch: Partial<DripStep>) => {
@@ -360,13 +370,19 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
       template_name: templateName,
       language: template?.language || 'en',
       category: (template?.category || 'MARKETING').toUpperCase(),
-      param_mapping: new Array(template?.paramCount || 0).fill('')
+      param_mapping: new Array(template?.paramCount || 0).fill(''),
+      header_media_url: '',
+      header_media_column: ''
     });
   };
 
   const previewRow = rows[0];
   const mappingFields = enrollmentSource === 'webhook' ? WEBHOOK_FIELDS.map(field => field.value) : headers;
   const renderPreviewVal = (col: string) => col && previewRow ? (previewRow[col] ?? '') : '—';
+  const selectedTemplateInfo = templates.find(t => t.name === selectedTemplate);
+  const selectedHeader = selectedTemplateInfo?.header;
+  const mediaHeaderIsMissing = (header: TemplateInfo['header'], url?: string, column?: string) =>
+    Boolean(header?.required && !url?.trim() && !(enrollmentSource === 'csv' && column));
 
   const continueDripSetup = () => {
     setError('');
@@ -395,7 +411,20 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
     if (enrollmentSource === 'csv' && rows.length === 0) { setError('Upload or paste a CSV with at least one row.'); return; }
     if (enrollmentSource === 'csv' && !phoneCol) { setError('Select which column holds the phone number.'); return; }
     if (!templateName.trim()) { setError('Enter a WhatsApp template name (or set one in Settings).'); return; }
+    if (mediaHeaderIsMissing(selectedHeader, headerMediaUrl, headerMediaColumn)) {
+      setError(`Add the required ${selectedHeader?.format.toLowerCase()} header URL for the first template.`);
+      return;
+    }
     if (kind === 'drip' && followUps.some(step => !step.template_name)) { setError('Select a template for every drip step.'); return; }
+    const missingFollowUpHeader = kind === 'drip' && followUps.find(step => {
+      const template = templates.find(item => item.name === step.template_name);
+      return mediaHeaderIsMissing(template?.header, step.header_media_url, step.header_media_column);
+    });
+    if (missingFollowUpHeader) {
+      const template = templates.find(item => item.name === missingFollowUpHeader.template_name);
+      setError(`Add the required ${template?.header?.format.toLowerCase()} header URL for ${missingFollowUpHeader.template_name}.`);
+      return;
+    }
     if (kind === 'drip' && enrollmentSource === 'csv' && shopifyCheckMode !== 'off' && !orderCol && !emailCol) { setError('Select an order number or email column for Shopify cross-checking.'); return; }
 
     setSaving(true);
@@ -414,7 +443,8 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
           order_column: kind === 'drip' && enrollmentSource === 'csv' ? orderCol : '', email_column: kind === 'drip' && enrollmentSource === 'csv' ? emailCol : '',
           steps: [{
             id: 'step_1', template_name: templateName, language, category,
-            delay_value: 0, delay_unit: 'minutes', param_mapping: paramMapping
+            delay_value: 0, delay_unit: 'minutes', param_mapping: paramMapping,
+            header_media_url: headerMediaUrl, header_media_column: headerMediaColumn
           }, ...(kind === 'drip' ? followUps : [])],
           rows, autostart
         })
@@ -534,12 +564,54 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
           <select className="select" value={selectedTemplate} onChange={e => pickTemplate(e.target.value)}>
             <option value="">— pick a template —</option>
             {templates.map(t => (
-              <option key={t.name} value={t.name}>{t.name} · {t.language} · {t.category} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}</option>
+              <option key={t.name} value={t.name}>
+                {t.name} · {t.language} · {t.category} · {t.paramCount} body var{t.paramCount !== 1 ? 's' : ''}
+                {t.header?.required ? ` · ${t.header.format.toLowerCase()} header` : ''}
+              </option>
             ))}
           </select>
           <div className="form-hint">{templatesMsg || 'Picking one fills in the name, language, category, and variable slots below.'}</div>
           {selectedBody && (
             <pre className="code-block" style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{selectedBody}</pre>
+          )}
+          {selectedHeader?.required && (
+            <div className="callout info mt-3" style={{ display: 'block' }}>
+              <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>
+                {selectedHeader.format} header required
+              </div>
+              <div className="text-sm mb-2">
+                Chatwoot requires a public HTTPS {selectedHeader.format.toLowerCase()} URL for every send.
+                This requirement was fetched from the selected template.
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: enrollmentSource === 'csv' ? '1fr 1fr' : '1fr', gap: 12 }}>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Fixed {selectedHeader.format.toLowerCase()} URL</label>
+                  <input
+                    className="input"
+                    type="url"
+                    value={headerMediaUrl}
+                    onChange={e => setHeaderMediaUrl(e.target.value)}
+                    placeholder="https://cdn.example.com/header.jpg"
+                  />
+                  <div className="form-hint">Used for every recipient in this step.</div>
+                </div>
+                {enrollmentSource === 'csv' && (
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="form-label">Or use a CSV URL column</label>
+                    <select className="select" value={headerMediaColumn} onChange={e => setHeaderMediaColumn(e.target.value)}>
+                      <option value="">— none —</option>
+                      {headers.map(header => <option key={header} value={header}>{header}</option>)}
+                    </select>
+                    <div className="form-hint">Overrides the fixed URL for each row.</div>
+                  </div>
+                )}
+              </div>
+              {selectedHeader.exampleUrl && (
+                <div className="form-hint mt-2">
+                  Chatwoot includes a sample header, but it is not reused because Meta sample URLs can expire.
+                </div>
+              )}
+            </div>
           )}
         </div>
 
@@ -619,6 +691,35 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
                 </select>
               </div>
             </div>
+            {(() => {
+              const template = templates.find(item => item.name === step.template_name);
+              const header = template?.header;
+              if (!header?.required) return null;
+              return (
+                <div className="callout info mb-3" style={{ display: 'block' }}>
+                  <div className="form-label">{header.format} header URL</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: enrollmentSource === 'csv' ? '1fr 1fr' : '1fr', gap: 12 }}>
+                    <input
+                      className="input"
+                      type="url"
+                      value={step.header_media_url || ''}
+                      onChange={e => updateFollowUp(index, { header_media_url: e.target.value })}
+                      placeholder="https://cdn.example.com/header.jpg"
+                    />
+                    {enrollmentSource === 'csv' && (
+                      <select
+                        className="select"
+                        value={step.header_media_column || ''}
+                        onChange={e => updateFollowUp(index, { header_media_column: e.target.value })}
+                      >
+                        <option value="">Or choose a CSV URL column</option>
+                        {headers.map(headerName => <option key={headerName} value={headerName}>{headerName}</option>)}
+                      </select>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
             {step.param_mapping.map((column, slot) => (
               <div key={slot} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
                 <span className="badge pending" style={{ minWidth: 44, justifyContent: 'center' }}>{`{{${slot + 1}}}`}</span>

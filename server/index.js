@@ -1066,6 +1066,7 @@ app.get('/api/whatsapp/templates', async (req, res) => {
     const templates = raw.map(t => {
       const comps = t.components || [];
       const bodyComp = comps.find(c => (c.type || '').toUpperCase() === 'BODY');
+      const headerComp = comps.find(c => (c.type || '').toUpperCase() === 'HEADER');
       const text = bodyComp?.text || '';
 
       // Extract each {{N}} placeholder in order (deduped, sorted numerically)
@@ -1096,6 +1097,12 @@ app.get('/api/whatsapp/templates', async (req, res) => {
         paramCount: variables.length,
         body: text,
         variables,
+        header: headerComp ? {
+          required: ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(headerComp.format || '').toUpperCase()),
+          format: String(headerComp.format || 'TEXT').toUpperCase(),
+          text: headerComp.text || '',
+          exampleUrl: headerComp.example?.header_handle?.[0] || null
+        } : null,
         buttons
       };
     });
@@ -1157,12 +1164,14 @@ app.post('/api/campaigns', async (req, res) => {
           category: String(step.category || 'MARKETING').toUpperCase(),
           delay_value: Math.max(0, Number(step.delay_value || 0)),
           delay_unit: ['minutes', 'hours', 'days'].includes(step.delay_unit) ? step.delay_unit : 'hours',
-          param_mapping: Array.isArray(step.param_mapping) ? step.param_mapping : []
+          param_mapping: Array.isArray(step.param_mapping) ? step.param_mapping : [],
+          header_media_url: String(step.header_media_url || '').trim(),
+          header_media_column: String(step.header_media_column || '').trim()
         }))
       : [{
           id: 'step_1', template_name: tmplName, language: language || 'en',
           category: category || 'UTILITY', delay_value: 0, delay_unit: 'minutes',
-          param_mapping: mapping
+          param_mapping: mapping, header_media_url: '', header_media_column: ''
         }];
     if (normalizedSteps.some(step => !step.template_name)) {
       return res.status(400).json({ error: 'Every drip step must have a WhatsApp template' });
@@ -1177,6 +1186,25 @@ app.post('/api/campaigns', async (req, res) => {
         return res.status(400).json({
           error: `Campaign step ${index + 1} is missing mappings for ${missing.join(', ')}`
         });
+      }
+      if (template.header && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(template.header.format)
+        && !step.header_media_url && !(source === 'csv' && step.header_media_column)) {
+        return res.status(400).json({
+          error: `Campaign step ${index + 1} requires a ${template.header.format.toLowerCase()} header URL`
+        });
+      }
+      const headerUrls = step.header_media_column && source === 'csv'
+        ? rows.map(row => String(row?.[step.header_media_column] || '').trim())
+        : (step.header_media_url ? [step.header_media_url] : []);
+      for (const headerUrl of headerUrls) {
+        try {
+          const parsedHeaderUrl = new URL(headerUrl);
+          if (parsedHeaderUrl.protocol !== 'https:') throw new Error('HTTPS required');
+        } catch (_) {
+          return res.status(400).json({
+            error: `Campaign step ${index + 1} has an invalid header URL. Use a public HTTPS URL.`
+          });
+        }
       }
     }
     const checkMode = source === 'webhook'
@@ -1195,6 +1223,9 @@ app.post('/api/campaigns', async (req, res) => {
       const step_variables = normalizedSteps.map(step => {
         const values = {};
         step.param_mapping.forEach((col, idx) => { values[String(idx + 1)] = col ? String(row[col] ?? '') : ''; });
+        values.__header_media_url = step.header_media_column
+          ? String(row[step.header_media_column] ?? '')
+          : step.header_media_url;
         return values;
       });
       return {

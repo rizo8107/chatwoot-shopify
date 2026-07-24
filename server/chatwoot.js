@@ -137,7 +137,7 @@ export function normalizePhone(phone, fallbackSourceId) {
 /**
  * Cached template info: body text and button components keyed by template name.
  * Shape: { at: timestamp, templates: { [name]: {
- *   body, bodyParamCount, buttons, category, language, status
+ *   body, bodyParamCount, header, buttons, category, language, status
  * } } }
  */
 let _templateCache = { at: 0, key: '', templates: {} };
@@ -167,6 +167,7 @@ async function refreshTemplateCache(settings) {
     for (const t of raw) {
       const comps = t.components || [];
       const bodyComp = comps.find(c => (c.type || '').toUpperCase() === 'BODY');
+      const headerComp = comps.find(c => (c.type || '').toUpperCase() === 'HEADER');
       const buttonComps = comps.filter(c => (c.type || '').toUpperCase() === 'BUTTONS');
       // Flatten button sub-entries; each button may itself be an array or object
       const buttons = [];
@@ -192,6 +193,11 @@ async function refreshTemplateCache(settings) {
       templates[t.name] = {
         body,
         bodyParamCount: bodyParamIndexes.length ? Math.max(...bodyParamIndexes) : 0,
+        header: headerComp ? {
+          format: String(headerComp.format || 'TEXT').toUpperCase(),
+          text: headerComp.text || '',
+          exampleUrl: headerComp.example?.header_handle?.[0] || null
+        } : null,
         buttons,
         category: String(t.category || 'MARKETING').toUpperCase(),
         language: t.language || 'en',
@@ -227,6 +233,30 @@ export async function getTemplateButtons(settings, templateName) {
   if (!templateName) return [];
   await refreshTemplateCache(settings);
   return _templateCache.templates[templateName]?.buttons || [];
+}
+
+/**
+ * Build Chatwoot's processed_params.header payload for media-header templates.
+ * Chatwoot requires a public URL and the lower-case media type.
+ */
+export function buildTemplateHeaderParams(templateHeader, mediaUrl) {
+  if (!templateHeader) return undefined;
+  const format = String(templateHeader.format || '').toUpperCase();
+  if (!['IMAGE', 'VIDEO', 'DOCUMENT'].includes(format)) return undefined;
+  if (!mediaUrl) {
+    const article = format === 'IMAGE' ? 'an' : 'a';
+    throw new Error(`Template requires ${article} ${format.toLowerCase()} header URL — not sending`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(String(mediaUrl));
+  } catch (_) {
+    throw new Error(`Invalid ${format.toLowerCase()} header URL — not sending`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`Template ${format.toLowerCase()} header must use a public HTTPS URL — not sending`);
+  }
+  return { media_url: String(mediaUrl), media_type: format.toLowerCase() };
 }
 
 /**

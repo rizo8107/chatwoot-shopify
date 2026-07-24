@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   assertParamsComplete,
   buildTemplateButtonParams,
+  buildTemplateHeaderParams,
   requireApprovedTemplate,
   resolveConversationId,
   sendWhatsAppTemplate
@@ -109,6 +110,50 @@ test('dynamic template buttons require a real mapped URL', () => {
     ),
     [{ type: 'url', parameter: 'checkouts/abc?key=123' }]
   );
+});
+
+test('media template headers require a public HTTPS URL', () => {
+  const header = { format: 'IMAGE' };
+  assert.throws(() => buildTemplateHeaderParams(header, ''), /requires an image header URL/);
+  assert.throws(() => buildTemplateHeaderParams(header, 'http://example.com/header.jpg'), /must use a public HTTPS URL/);
+  assert.deepEqual(
+    buildTemplateHeaderParams(header, 'https://cdn.example.com/header.jpg'),
+    { media_url: 'https://cdn.example.com/header.jpg', media_type: 'image' }
+  );
+  assert.equal(buildTemplateHeaderParams(null, ''), undefined);
+});
+
+test('template metadata includes required image header details', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      message_templates: [{
+        name: 'image_campaign',
+        status: 'APPROVED',
+        category: 'MARKETING',
+        language: 'en',
+        components: [
+          { type: 'HEADER', format: 'IMAGE', example: { header_handle: ['https://cdn.example.com/sample.jpg'] } },
+          { type: 'BODY', text: 'Hi {{1}}' }
+        ]
+      }]
+    })
+  });
+  try {
+    const template = await requireApprovedTemplate(
+      { ...baseSettings, CHATWOOT_API_URL: 'https://image-template.test' },
+      'image_campaign'
+    );
+    assert.deepEqual(template.header, {
+      format: 'IMAGE',
+      text: '',
+      exampleUrl: 'https://cdn.example.com/sample.jpg'
+    });
+    assert.equal(template.bodyParamCount, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test('existing open conversation is reused', async () => {

@@ -14,7 +14,7 @@ import {
 } from './db.js';
 import {
   normalizePhone, renderTemplateBody, resolveContactId, resolveConversationId,
-  buildTemplateButtonParams, requireApprovedTemplate, assertParamsComplete
+  buildTemplateButtonParams, buildTemplateHeaderParams, requireApprovedTemplate, assertParamsComplete
 } from './chatwoot.js';
 import { checkShopifyOrder, normalizeShop } from './shopify.js';
 
@@ -77,6 +77,7 @@ export async function enrollWebhookDripCampaigns(topic, context) {
       (step.param_mapping || []).forEach((field, index) => {
         values[String(index + 1)] = field ? String(contextValue(context, field) ?? '') : '';
       });
+      if (step.header_media_url) values.__header_media_url = step.header_media_url;
       return values;
     });
     const enrolled = await enrollCampaignRecipient({
@@ -136,6 +137,10 @@ async function sendOne(recipient, settings) {
   const txId = `cmp_${recipient.id}_s${stepIndex}`;
   const logId = `${txId}_log`;
   const variables = stepVariables[stepIndex] || legacyVariables;
+  const bodyVariables = Object.fromEntries(
+    Object.entries(variables).filter(([key]) => /^\d+$/.test(key))
+  );
+  const headerMediaUrl = variables.__header_media_url || campaignStep?.header_media_url || '';
   let shopifyCheck = null;
 
   try {
@@ -188,7 +193,8 @@ async function sendOne(recipient, settings) {
       templateName: campaignStep.template_name || recipient.template_name,
       language: campaignStep.language || recipient.language,
       category: campaignStep.category || recipient.category,
-      processedParams: variables,
+      processedParams: bodyVariables,
+      headerMediaUrl,
       settings
     });
 
@@ -211,7 +217,7 @@ async function sendOne(recipient, settings) {
     });
     await logTransaction({
       id: txId, flow_id: null,
-      order_number: recipient.order_reference || variables['1'] || null, customer_name: recipient.name, phone_number: recipient.phone,
+      order_number: recipient.order_reference || bodyVariables['1'] || null, customer_name: recipient.name, phone_number: recipient.phone,
       status: 'success', type: 'campaign', steps: [
         ...(shopifyCheck ? [{ name: 'Shopify Order Cross-check', status: 'success', response: shopifyCheck }] : []),
         result.step
@@ -232,7 +238,7 @@ async function sendOne(recipient, settings) {
     });
     await logTransaction({
       id: txId, flow_id: null,
-      order_number: recipient.order_reference || variables['1'] || null, customer_name: recipient.name, phone_number: recipient.phone,
+      order_number: recipient.order_reference || bodyVariables['1'] || null, customer_name: recipient.name, phone_number: recipient.phone,
       status: 'failed', type: 'campaign', steps: [], error_message: err.message
     });
     console.error(`[Campaign] Failed for ${recipient.phone}: ${err.message}`);
@@ -246,7 +252,7 @@ async function sendOne(recipient, settings) {
  * Reuses an existing contact if found (so existing contacts are messaged,
  * not skipped), otherwise creates one, then opens a conversation and sends.
  */
-export async function sendTemplateMessage({ phone, name, email, templateName, language, category, processedParams, settings }) {
+export async function sendTemplateMessage({ phone, name, email, templateName, language, category, processedParams, headerMediaUrl, settings }) {
   const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
   const token = settings.CHATWOOT_API_TOKEN;
   const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
@@ -281,6 +287,8 @@ export async function sendTemplateMessage({ phone, name, email, templateName, la
   });
 
   const finalProcessedParams = { body: processedParams || {} };
+  const processedParamsHeader = buildTemplateHeaderParams(template.header, headerMediaUrl);
+  if (processedParamsHeader) finalProcessedParams.header = processedParamsHeader;
   if (processedParamsButtons) finalProcessedParams.buttons = processedParamsButtons;
 
   const msgUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
