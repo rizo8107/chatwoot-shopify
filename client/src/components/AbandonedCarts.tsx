@@ -93,7 +93,10 @@ export const AbandonedCarts: React.FC = () => {
       const res = await fetch(`${API}/abandoned-carts/${cartId}/recover`, {
         method: 'POST'
       });
-      if (!res.ok) throw new Error('Failed to mark as recovered');
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to mark as recovered');
+      }
       await loadData();
       setSelectedCart(null);
     } catch (err: any) {
@@ -108,7 +111,7 @@ export const AbandonedCarts: React.FC = () => {
 
   const formatCurrency = (price: string | number) => {
     const num = typeof price === 'string' ? parseFloat(price) : price;
-    return '$' + (num || 0).toFixed(2);
+    return `₹${(num || 0).toFixed(2)}`;
   };
 
   const hoursAgo = (iso: string) => {

@@ -8,6 +8,7 @@
 import {
   getAllSettings,
   getAbandonedCartFlows,
+  getAbandonedCartFlowById,
   getAbandonedCartByToken,
   scheduleAbandonedCartJob,
   getDueAbandonedCartJobs,
@@ -67,12 +68,21 @@ export async function cancelRecoveryForOrder(checkoutToken) {
 }
 
 /** Build the template context the Recovery Flow variable mappings draw from. */
-function buildCartContext(cart) {
-  const fullName = (cart.customer_name || '').trim();
-  const firstName = fullName.split(/\s+/)[0] || '';
+export function buildCartContext(cart) {
+  const rawName = (cart.customer_name || '').trim();
+  const hasUsefulName = rawName && !rawName.includes('@') && !/^customer$/i.test(rawName);
+  const fullName = hasUsefulName ? rawName : 'Customer';
+  const firstName = hasUsefulName ? fullName.split(/\s+/)[0] : 'there';
   const { formattedPhone, sourceId } = normalizePhone(cart.customer_phone, `cart-${cart.checkout_token}`);
   const items = Array.isArray(cart.cart_items) ? cart.cart_items : [];
   const itemsSummary = items.map(i => `${i.title} x${i.quantity} @ INR ${i.price}`).join(', ') || 'your items';
+  const total = Number(cart.cart_total_price);
+  const checkoutDateValue = cart.abandoned_at || cart.created_at;
+  const checkoutDate = Number.isNaN(new Date(checkoutDateValue).getTime())
+    ? ''
+    : new Date(checkoutDateValue).toLocaleDateString('en-IN', {
+        day: '2-digit', month: 'short', year: 'numeric'
+      });
 
   return {
     type: 'checkout',
@@ -83,8 +93,9 @@ function buildCartContext(cart) {
     sourceId,
     email: cart.customer_email || '',
     itemsSummary,
-    totalPrice: cart.cart_total_price || '',
+    totalPrice: Number.isFinite(total) ? `INR ${total.toFixed(2)}` : String(cart.cart_total_price || ''),
     abandonedCheckoutUrl: cart.shopify_checkout_url || '',
+    checkoutDate,
     checkoutId: cart.checkout_token,
     orderNumber: cart.checkout_token,
     orderName: `Cart ${String(cart.checkout_token).slice(0, 8)}`
@@ -107,6 +118,28 @@ export async function processDueRecoveryJobs() {
 
 async function runJob(job) {
   try {
+    // Jobs keep a snapshot for auditability, but the active flow definition is
+    // authoritative at send time. This makes pause/delete/edit take effect
+    // even if a scheduler fetched the job just before the UI change.
+    const flow = await getAbandonedCartFlowById(job.flow_id);
+    if (!flow || !flow.is_active) {
+      await updateAbandonedCartJob(job.id, {
+        status: 'cancelled',
+        error_message: flow ? 'Recovery flow is paused' : 'Recovery flow was deleted'
+      });
+      return;
+    }
+    const configuredMessage = (flow.messages || []).find(
+      message => Number(message.sequence_order) === Number(job.sequence_order)
+    );
+    if (!configuredMessage?.template_name) {
+      await updateAbandonedCartJob(job.id, {
+        status: 'cancelled',
+        error_message: 'Message was removed from the recovery flow'
+      });
+      return;
+    }
+
     const cart = await getAbandonedCartByToken(job.checkout_token);
     if (!cart) {
       await updateAbandonedCartJob(job.id, { status: 'skipped', error_message: 'Cart no longer exists' });
@@ -129,7 +162,10 @@ async function runJob(job) {
     const dedupeKey = `acr:${job.flow_id}:${job.sequence_order}:${job.checkout_token}`;
 
     const result = await sendWhatsAppTemplate(
-      { templateName: job.template_name, variableMapping: job.variable_mapping },
+      {
+        templateName: configuredMessage.template_name,
+        variableMapping: configuredMessage.variable_mapping || {}
+      },
       context,
       settings,
       step,
@@ -142,11 +178,11 @@ async function runJob(job) {
     if (result.ok) {
       await updateAbandonedCartJob(job.id, { status: result.skipped ? 'skipped' : 'sent' });
       if (!result.skipped) {
-        console.log(`[Recovery] Sent "${job.template_name}" (msg #${job.sequence_order}) to ${context.phone} for cart ${job.checkout_token}`);
+        console.log(`[Recovery] Sent "${configuredMessage.template_name}" (msg #${job.sequence_order}) to ${context.phone} for cart ${job.checkout_token}`);
       }
     } else {
       await updateAbandonedCartJob(job.id, { status: 'failed', error_message: result.error });
-      console.error(`[Recovery] Failed msg #${job.sequence_order} for cart ${job.checkout_token}: ${result.error}`);
+      console.error(`[Recovery] Failed "${configuredMessage.template_name}" (msg #${job.sequence_order}) for cart ${job.checkout_token}: ${result.error}`);
     }
 
     // Surface in the Logs page alongside webhook/flow/campaign transactions.

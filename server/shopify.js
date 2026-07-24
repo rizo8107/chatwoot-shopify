@@ -43,6 +43,19 @@ export function verifyHmac(query, secret) {
   return crypto.timingSafeEqual(a, b);
 }
 
+/** Verify an HTTPS webhook against Shopify's raw-body HMAC signature. */
+export function verifyWebhookHmac(rawBody, providedHmac, secret) {
+  if (!rawBody || !providedHmac || !secret) return false;
+  const computed = crypto
+    .createHmac('sha256', secret)
+    .update(rawBody)
+    .digest('base64');
+  const provided = Buffer.from(String(providedHmac), 'utf8');
+  const expected = Buffer.from(computed, 'utf8');
+  if (provided.length !== expected.length) return false;
+  return crypto.timingSafeEqual(provided, expected);
+}
+
 /** Exchange an authorization code for a permanent Admin API access token. */
 export async function exchangeToken({ shop, apiKey, apiSecret, code }) {
   const res = await fetch(`https://${shop}/admin/oauth/access_token`, {

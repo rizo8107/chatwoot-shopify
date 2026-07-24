@@ -926,7 +926,13 @@ export async function scheduleAbandonedCartJob({ cart_id, checkout_token, flow_i
 
 export async function getDueAbandonedCartJobs(limit = 10) {
   const rows = await all(
-    `SELECT * FROM abandoned_cart_jobs WHERE status = 'pending' AND run_at <= ? ORDER BY run_at ASC LIMIT ?`,
+    `SELECT j.*
+     FROM abandoned_cart_jobs j
+     JOIN abandoned_cart_flows f ON f.id = j.flow_id AND f.is_active = 1
+     JOIN abandoned_carts c ON c.checkout_token = j.checkout_token AND c.status = 'abandoned'
+     WHERE j.status = 'pending' AND j.run_at <= ?
+     ORDER BY j.run_at ASC
+     LIMIT ?`,
     [new Date().toISOString(), limit]
   );
   return rows.map(r => ({ ...r, variable_mapping: JSON.parse(r.variable_mapping || '{}') }));
@@ -946,6 +952,77 @@ export async function cancelAbandonedCartJobsForToken(checkout_token) {
     [new Date().toISOString(), String(checkout_token)]
   );
   return res.changes;
+}
+
+/** Stop queued messages when a recovery flow is paused, replaced, or deleted. */
+export async function cancelAbandonedCartJobsForFlow(flow_id, reason = 'Recovery flow is inactive') {
+  const res = await run(
+    `UPDATE abandoned_cart_jobs
+     SET status = 'cancelled', error_message = ?, updated_at = ?
+     WHERE flow_id = ? AND status = 'pending'`,
+    [reason, new Date().toISOString(), flow_id]
+  );
+  return res.changes;
+}
+
+/**
+ * Keep queued jobs aligned with the current flow definition. Sent/cancelled
+ * history is immutable; only not-yet-sent jobs are refreshed.
+ */
+export async function syncPendingAbandonedCartJobsForFlow(flow_id, messages = []) {
+  const jobs = await all(
+    `SELECT j.id, j.sequence_order, c.abandoned_at, c.created_at
+     FROM abandoned_cart_jobs j
+     LEFT JOIN abandoned_carts c ON c.checkout_token = j.checkout_token
+     WHERE j.flow_id = ? AND j.status = 'pending'`,
+    [flow_id]
+  );
+  const bySequence = new Map((messages || []).map(message => [Number(message.sequence_order), message]));
+  let updated = 0;
+  let cancelled = 0;
+
+  for (const job of jobs) {
+    const message = bySequence.get(Number(job.sequence_order));
+    if (!message) {
+      await run(
+        `UPDATE abandoned_cart_jobs
+         SET status = 'cancelled', error_message = ?, updated_at = ?
+         WHERE id = ? AND status = 'pending'`,
+        ['Message was removed from the recovery flow', new Date().toISOString(), job.id]
+      );
+      cancelled++;
+      continue;
+    }
+
+    const anchor = new Date(job.abandoned_at || job.created_at).getTime();
+    if (!Number.isFinite(anchor)) {
+      await run(
+        `UPDATE abandoned_cart_jobs
+         SET status = 'cancelled', error_message = ?, updated_at = ?
+         WHERE id = ? AND status = 'pending'`,
+        ['Cart no longer has a valid abandonment date', new Date().toISOString(), job.id]
+      );
+      cancelled++;
+      continue;
+    }
+    const delay = Number(message.delay_minutes) || 0;
+    const runAt = new Date(anchor + delay * 60_000).toISOString();
+    const res = await run(
+      `UPDATE abandoned_cart_jobs
+       SET template_name = ?, variable_mapping = ?, run_at = ?, error_message = NULL, updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+      [
+        message.template_name,
+        JSON.stringify(message.variable_mapping || {}),
+        runAt,
+        new Date().toISOString(),
+        job.id
+      ]
+    );
+    updated += res.changes;
+  }
+
+  return { updated, cancelled };
 }
 
 export async function getAbandonedCartStats() {
@@ -976,6 +1053,24 @@ export async function saveAbandonedCartFlow({ id, name, description, is_active, 
        messages = EXCLUDED.messages, updated_at = EXCLUDED.updated_at`,
     [id, name, description, is_active ? 1 : 0, JSON.stringify(messages || []), new Date().toISOString(), new Date().toISOString()]
   );
+  if (is_active) {
+    // Recovery flows do not have audience conditions, so activating more than
+    // one would send duplicate sequences to every cart. Keep exactly one active.
+    const otherActive = await all(
+      `SELECT id FROM abandoned_cart_flows WHERE id <> ? AND is_active = 1`,
+      [id]
+    );
+    await run(
+      `UPDATE abandoned_cart_flows SET is_active = 0, updated_at = ? WHERE id <> ? AND is_active = 1`,
+      [new Date().toISOString(), id]
+    );
+    for (const flow of otherActive) {
+      await cancelAbandonedCartJobsForFlow(flow.id, 'Another recovery flow was activated');
+    }
+    await syncPendingAbandonedCartJobsForFlow(id, messages || []);
+  } else {
+    await cancelAbandonedCartJobsForFlow(id, 'Recovery flow was saved inactive');
+  }
 }
 
 export async function getAbandonedCartFlows() {
@@ -999,12 +1094,29 @@ export async function getAbandonedCartFlowById(id) {
 }
 
 export async function deleteAbandonedCartFlow(id) {
+  await cancelAbandonedCartJobsForFlow(id, 'Recovery flow was deleted');
   await run(`DELETE FROM abandoned_cart_flows WHERE id = ?`, [id]);
 }
 
 export async function toggleAbandonedCartFlow(id, is_active) {
+  if (is_active) {
+    const otherActive = await all(
+      `SELECT id FROM abandoned_cart_flows WHERE id <> ? AND is_active = 1`,
+      [id]
+    );
+    await run(
+      `UPDATE abandoned_cart_flows SET is_active = 0, updated_at = ? WHERE id <> ? AND is_active = 1`,
+      [new Date().toISOString(), id]
+    );
+    for (const flow of otherActive) {
+      await cancelAbandonedCartJobsForFlow(flow.id, 'Another recovery flow was activated');
+    }
+  }
   await run(
     `UPDATE abandoned_cart_flows SET is_active = ?, updated_at = ? WHERE id = ?`,
     [is_active ? 1 : 0, new Date().toISOString(), id]
   );
+  if (!is_active) {
+    await cancelAbandonedCartJobsForFlow(id, 'Recovery flow was paused');
+  }
 }

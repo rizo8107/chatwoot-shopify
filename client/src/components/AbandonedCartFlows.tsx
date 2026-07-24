@@ -6,20 +6,13 @@ const API = '/api';
 const CONTEXT_FIELDS: { value: string; label: string; example: string }[] = [
   { value: 'firstName',           label: 'First Name',           example: 'Nirmal' },
   { value: 'fullName',            label: 'Full Name',            example: 'Nirmal Raj' },
+  { value: 'lastName',            label: 'Last Name',            example: 'Raj' },
+  { value: 'email',               label: 'Customer Email',       example: 'nirmal@example.com' },
+  { value: 'phone',               label: 'Customer Phone',       example: '+919876543210' },
   { value: 'itemsSummary',        label: 'Cart Items Summary',   example: 'Incense Combo x1' },
-  { value: 'totalPrice',          label: 'Cart Total Price',     example: '₹405.00' },
+  { value: 'totalPrice',          label: 'Cart Total Price',     example: 'INR 405.00' },
   { value: 'abandonedCheckoutUrl',label: 'Checkout Recovery URL',example: 'https://pay.stomatalfarms.com/...' },
   { value: 'checkoutDate',        label: 'Abandoned Date',       example: '06 Jul 2026' },
-  { value: 'orderName',           label: 'Order Name',           example: '#1234' },
-  { value: 'orderNumber',         label: 'Order Number',         example: '1234' },
-  { value: 'orderStatusUrl',      label: 'Order Status URL',     example: 'https://...' },
-  { value: 'totalPrice',          label: 'Order Total',          example: '₹560.00' },
-  { value: 'itemsSummary',        label: 'Order Items',          example: 'Product x2' },
-  { value: 'orderDate',           label: 'Order Date',           example: '06 Jul 2026' },
-  { value: 'shippingCity',        label: 'Shipping City',        example: 'Chennai' },
-  { value: 'trackingUrl',         label: 'Tracking URL',         example: 'https://...' },
-  { value: 'trackingNumber',      label: 'Tracking Number',      example: 'TRK123' },
-  { value: 'trackingCompany',     label: 'Courier Company',      example: 'Delhivery' },
 ];
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -164,26 +157,12 @@ const VariableMapper: React.FC<{
                   }}>
                     btn[{btn.index}]
                   </div>
-                  <select
-                    className="select"
-                    style={{ fontSize: 12, padding: '4px 8px', height: 32 }}
-                    value={mapping[key] || 'abandonedCheckoutUrl'}
-                    onChange={e => setField(key, e.target.value)}
+                  <div
+                    className="input"
+                    style={{ fontSize: 12, height: 32, display: 'flex', alignItems: 'center' }}
                   >
-                    <option value="">— choose a field —</option>
-                    {CONTEXT_FIELDS.filter(f => f.value.toLowerCase().includes('url') || f.value.toLowerCase().includes('link')).map((f, i) => (
-                      <option key={`${f.value}_${i}`} value={f.value}>
-                        {f.label} · e.g. {f.example}
-                      </option>
-                    ))}
-                    <optgroup label="── All fields ──">
-                      {CONTEXT_FIELDS.map((f, i) => (
-                        <option key={`all_${f.value}_${i}`} value={f.value}>
-                          {f.label}
-                        </option>
-                      ))}
-                    </optgroup>
-                  </select>
+                    Checkout Recovery URL
+                  </div>
                 </div>
               );
             })}

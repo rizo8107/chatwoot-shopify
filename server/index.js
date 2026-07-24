@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 
 import {
   isValidShop, normalizeShop, buildInstallUrl, verifyHmac,
-  exchangeToken, registerWebhooks, fetchAbandonedCheckouts
+  verifyWebhookHmac, exchangeToken, registerWebhooks, fetchAbandonedCheckouts
 } from './shopify.js';
 
 import { fetchChatwootContacts, importContacts } from './contacts.js';
@@ -44,7 +44,6 @@ import {
   saveAbandonedCart,
   getAbandonedCarts,
   getAbandonedCartById,
-  updateAbandonedCartStatus,
   getAbandonedCartStats,
   saveAbandonedCartFlow,
   getAbandonedCartFlows,
@@ -76,11 +75,19 @@ const __dirname = dirname(__filename);
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, _res, buffer) => {
+    if (req.originalUrl?.startsWith('/api/webhook/shopify')) {
+      req.rawBody = Buffer.from(buffer);
+    }
+  }
+}));
 
 const PORT = process.env.PORT || 3000;
 let backendReady = false;
 let backendInitError = null;
+let shopifyWebhookSecret = process.env.SHOPIFY_API_SECRET || '';
 
 // ─── Auth gate ──────────────────────────────────────────────────────────────
 // Protects all /api routes except: auth endpoints, the Shopify webhook, and the
@@ -274,7 +281,13 @@ app.get('/api/settings', async (req, res) => {
 });
 
 app.post('/api/settings', async (req, res) => {
-  try { await saveSettings(req.body); res.json({ success: true }); }
+  try {
+    await saveSettings(req.body);
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'SHOPIFY_API_SECRET')) {
+      shopifyWebhookSecret = String(req.body.SHOPIFY_API_SECRET || '');
+    }
+    res.json({ success: true });
+  }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -307,8 +320,10 @@ app.get('/api/abandoned-carts/:id', async (req, res) => {
 
 app.post('/api/abandoned-carts/:id/recover', async (req, res) => {
   try {
-    await updateAbandonedCartStatus(req.params.id, 'recovered', new Date().toISOString());
-    res.json({ success: true });
+    const cart = await getAbandonedCartById(req.params.id);
+    if (!cart) return res.status(404).json({ error: 'Cart not found' });
+    await cancelRecoveryForOrder(cart.checkout_token);
+    res.json({ success: true, checkout_token: cart.checkout_token });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -362,14 +377,35 @@ app.post('/api/abandoned-carts/sync', async (req, res) => {
 
 // ─── Abandoned Cart Recovery Flows ────────────────────────────────────────
 
+const RECOVERY_CONTEXT_FIELDS = new Set([
+  'firstName', 'fullName', 'lastName', 'email', 'phone',
+  'itemsSummary', 'totalPrice', 'abandonedCheckoutUrl', 'checkoutDate'
+]);
+
 async function validateRecoveryMessages(messages) {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error('Add at least one recovery message');
   }
+  if (messages.length > 5) {
+    throw new Error('A recovery flow can contain at most 5 messages');
+  }
+
   const settings = await getAllSettings();
+  const normalized = [];
+  let previousDelay = -1;
+
   for (const [index, message] of messages.entries()) {
     const template = await requireApprovedTemplate(settings, message?.template_name);
-    const mapping = message?.variable_mapping || {};
+    const delay = Number(message?.delay_minutes);
+    if (!Number.isInteger(delay) || delay < 0 || delay > 43_200) {
+      throw new Error(`Recovery message ${index + 1} must use a whole-minute delay between 0 and 43,200`);
+    }
+    if (delay < previousDelay) {
+      throw new Error(`Recovery message ${index + 1} must be scheduled after message ${index}`);
+    }
+    previousDelay = delay;
+
+    const mapping = { ...(message?.variable_mapping || {}) };
     const missing = [];
     for (let parameter = 1; parameter <= template.bodyParamCount; parameter++) {
       if (!mapping[`{{${parameter}}}`]) missing.push(`{{${parameter}}}`);
@@ -377,7 +413,25 @@ async function validateRecoveryMessages(messages) {
     if (missing.length > 0) {
       throw new Error(`Recovery message ${index + 1} is missing mappings for ${missing.join(', ')}`);
     }
+
+    for (const [placeholder, contextField] of Object.entries(mapping)) {
+      if (!RECOVERY_CONTEXT_FIELDS.has(String(contextField))) {
+        throw new Error(`Recovery message ${index + 1} maps ${placeholder} to unavailable field "${contextField}"`);
+      }
+    }
+    for (const button of template.buttons || []) {
+      mapping[`button_${button.index}`] = 'abandonedCheckoutUrl';
+    }
+
+    normalized.push({
+      id: String(message.id || `msg_${index + 1}`),
+      sequence_order: index + 1,
+      template_name: template.name,
+      delay_minutes: delay,
+      variable_mapping: mapping
+    });
   }
+  return normalized;
 }
 
 app.get('/api/abandoned-cart-flows', async (req, res) => {
@@ -399,9 +453,15 @@ app.post('/api/abandoned-cart-flows', async (req, res) => {
   try {
     const { id, name, description, is_active, messages } = req.body;
     if (!String(name || '').trim()) return res.status(400).json({ error: 'Flow name is required' });
-    await validateRecoveryMessages(messages);
+    const normalizedMessages = await validateRecoveryMessages(messages);
     const flowId = id || genId('acf');
-    await saveAbandonedCartFlow({ id: flowId, name, description, is_active: is_active !== false, messages: messages || [] });
+    await saveAbandonedCartFlow({
+      id: flowId,
+      name: String(name).trim(),
+      description,
+      is_active: is_active !== false,
+      messages: normalizedMessages
+    });
     res.json({ success: true, id: flowId });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -410,8 +470,17 @@ app.put('/api/abandoned-cart-flows/:id', async (req, res) => {
   try {
     const { name, description, is_active, messages } = req.body;
     if (!String(name || '').trim()) return res.status(400).json({ error: 'Flow name is required' });
-    await validateRecoveryMessages(messages);
-    await saveAbandonedCartFlow({ id: req.params.id, name, description, is_active: is_active !== false, messages: messages || [] });
+    if (!(await getAbandonedCartFlowById(req.params.id))) {
+      return res.status(404).json({ error: 'Flow not found' });
+    }
+    const normalizedMessages = await validateRecoveryMessages(messages);
+    await saveAbandonedCartFlow({
+      id: req.params.id,
+      name: String(name).trim(),
+      description,
+      is_active: is_active !== false,
+      messages: normalizedMessages
+    });
     res.json({ success: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -426,7 +495,9 @@ app.delete('/api/abandoned-cart-flows/:id', async (req, res) => {
 app.post('/api/abandoned-cart-flows/:id/toggle', async (req, res) => {
   try {
     const { is_active } = req.body;
-    await toggleAbandonedCartFlow(req.params.id, is_active);
+    const flow = await getAbandonedCartFlowById(req.params.id);
+    if (!flow) return res.status(404).json({ error: 'Flow not found' });
+    await toggleAbandonedCartFlow(req.params.id, is_active === true);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -728,6 +799,14 @@ function parseWebhookPayload(req) {
 }
 
 app.post('/api/webhook/shopify', async (req, res) => {
+  const providedHmac = req.headers['x-shopify-hmac-sha256'];
+  if (!shopifyWebhookSecret) {
+    return res.status(503).json({ success: false, error: 'Shopify webhook verification is not configured' });
+  }
+  if (!verifyWebhookHmac(req.rawBody, providedHmac, shopifyWebhookSecret)) {
+    return res.status(401).json({ success: false, error: 'Invalid Shopify webhook signature' });
+  }
+
   let rawBody, topic, details;
   try {
     ({ rawBody, topic, details } = parseWebhookPayload(req));
@@ -1191,6 +1270,8 @@ app.get('*', (req, res, next) => {
 async function initializeBackend() {
   try {
     await initDb();
+    const settings = await getAllSettings();
+    shopifyWebhookSecret = settings.SHOPIFY_API_SECRET || process.env.SHOPIFY_API_SECRET || '';
     backendReady = true;
     backendInitError = null;
     startScheduler();

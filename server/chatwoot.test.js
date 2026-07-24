@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertParamsComplete,
+  buildTemplateButtonParams,
   requireApprovedTemplate,
   resolveConversationId,
   sendWhatsAppTemplate
@@ -88,6 +89,26 @@ test('non-approved template fails closed', async () => {
 test('required body parameters cannot be omitted', () => {
   assert.throws(() => assertParamsComplete({}, 2), /\{\{1\}\}.*\{\{2\}\}/);
   assert.doesNotThrow(() => assertParamsComplete({ 1: 'A', 2: 'B' }, 2));
+});
+
+test('dynamic template buttons require a real mapped URL', () => {
+  const buttons = [{ index: 0, type: 'URL', url: 'https://pay.example/{{1}}' }];
+  assert.throws(
+    () => buildTemplateButtonParams(buttons, {}, { button_0: 'abandonedCheckoutUrl' }),
+    /Missing value for template button/
+  );
+  assert.throws(
+    () => buildTemplateButtonParams(buttons, { abandonedCheckoutUrl: 'not-a-url' }),
+    /Invalid URL for template button/
+  );
+  assert.deepEqual(
+    buildTemplateButtonParams(
+      buttons,
+      { abandonedCheckoutUrl: 'https://pay.example/checkouts/abc?key=123' },
+      { button_0: 'abandonedCheckoutUrl' }
+    ),
+    [{ type: 'url', parameter: 'checkouts/abc?key=123' }]
+  );
 });
 
 test('existing open conversation is reused', async () => {

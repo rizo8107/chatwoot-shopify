@@ -245,8 +245,16 @@ export function buildTemplateButtonParams(templateButtons, context = {}, richMap
     const targetUrl = context[contextKey]
       || context.abandonedCheckoutUrl
       || context.orderStatusUrl
-      || context.trackingUrl
-      || 'https://stomatalfarms.com';
+      || context.trackingUrl;
+    if (!targetUrl) {
+      throw new Error(`Missing value for template button ${btn.index + 1} (${contextKey}) — not sending`);
+    }
+    try {
+      const parsed = new URL(String(targetUrl));
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('unsupported protocol');
+    } catch (_) {
+      throw new Error(`Invalid URL for template button ${btn.index + 1} (${contextKey}) — not sending`);
+    }
 
     // Meta URL templates store a fixed prefix/suffix around {{1}}. Chatwoot's
     // `parameter` must contain only the dynamic portion, not the complete URL.
@@ -743,11 +751,8 @@ export async function sendWhatsAppTemplate(nodeData, context, settings, step, de
 /** Default fallback values for common context fields when empty. */
 function getContextFallback(key) {
   const fallbacks = {
-    trackingUrl: 'https://stomatalfarms.com',
     trackingCompany: 'Manual',
     trackingNumber: 'Shipped',
-    abandonedCheckoutUrl: 'https://stomatalfarms.com/checkout',
-    orderStatusUrl: 'https://stomatalfarms.com',
   };
   return fallbacks[key] || '';
 }
