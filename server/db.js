@@ -1,5 +1,6 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { campaignRetryDecision, MAX_CAMPAIGN_DELIVERY_RETRIES } from './campaignRetryPolicy.js';
 
 dotenv.config();
 
@@ -180,7 +181,8 @@ export async function initDb() {
       status TEXT NOT NULL DEFAULT 'pending',
       error_message TEXT,
       run_at TEXT,
-      sent_at TEXT
+      sent_at TEXT,
+      delivery_retry_count INTEGER NOT NULL DEFAULT 0
     )
   `);
 
@@ -285,6 +287,7 @@ export async function initDb() {
   try { await run(`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS step_variables TEXT NOT NULL DEFAULT '[]'`); } catch (_) {}
   try { await run(`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS current_step INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
   try { await run(`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS last_shopify_status TEXT`); } catch (_) {}
+  try { await run(`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS delivery_retry_count INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 
   await run(`
     CREATE TABLE IF NOT EXISTS campaign_message_logs (
@@ -410,7 +413,7 @@ const CAMPAIGN_DELIVERY_RANK = { accepted: 0, sent: 1, delivered: 2, read: 3, fa
 async function applyCampaignDeliveryStatus(chatwootMessageId, status, errorMessage = null) {
   const row = await get(
     `SELECT cml.id AS log_id, cml.status AS log_status, cml.step_index,
-            cr.id AS recipient_id, cr.status AS recipient_status, cr.current_step,
+            cr.id AS recipient_id, cr.status AS recipient_status, cr.current_step, cr.delivery_retry_count,
             c.id AS campaign_id, c.steps, c.enrollment_source
      FROM campaign_message_logs cml
      JOIN campaign_recipients cr ON cr.id = cml.recipient_id
@@ -420,6 +423,9 @@ async function applyCampaignDeliveryStatus(chatwootMessageId, status, errorMessa
   );
   if (!row) return false;
   if ((CAMPAIGN_DELIVERY_RANK[row.log_status] || 0) > (CAMPAIGN_DELIVERY_RANK[status] || 0)) return true;
+  if (status === 'failed' && row.log_status === 'failed' && row.recipient_status === 'retry_scheduled') {
+    return true;
+  }
 
   await run(
     `UPDATE campaign_message_logs SET status = ?, error_message = ? WHERE id = ?`,
@@ -440,6 +446,26 @@ async function applyCampaignDeliveryStatus(chatwootMessageId, status, errorMessa
       );
     }
   } else if (status === 'failed') {
+    const retry = campaignRetryDecision(errorMessage, row.delivery_retry_count);
+    if (retry.shouldRetry) {
+      if (wasSuccessful) {
+        await run(`UPDATE campaigns SET sent = GREATEST(0, sent - 1) WHERE id = ?`, [row.campaign_id]);
+      }
+      const retryMessage = `${errorMessage || 'WhatsApp delivery failed'} — automatic retry ${retry.retryCount}/${MAX_CAMPAIGN_DELIVERY_RETRIES} scheduled for ${retry.runAt}`;
+      await run(
+        `UPDATE campaign_message_logs SET status = 'failed', error_message = ? WHERE id = ?`,
+        [retryMessage, row.log_id]
+      );
+      await run(
+        `UPDATE campaign_recipients
+         SET status = 'retry_scheduled', error_message = ?, run_at = ?, sent_at = NULL, delivery_retry_count = ?
+         WHERE id = ?`,
+        [retryMessage, retry.runAt, retry.retryCount, row.recipient_id]
+      );
+      await run(`UPDATE campaigns SET status = 'running' WHERE id = ?`, [row.campaign_id]);
+      await finalizeCampaignIfDone(row.campaign_id);
+      return true;
+    }
     if (wasSuccessful) {
       await run(`UPDATE campaigns SET sent = GREATEST(0, sent - 1) WHERE id = ?`, [row.campaign_id]);
     }
@@ -529,6 +555,56 @@ export async function getPendingCampaignDeliveries(limit = 100) {
       conversation_id: details.conversationId || null
     };
   });
+}
+
+export async function scheduleCampaignRetry(recipientId, errorMessage) {
+  const row = await get(
+    `SELECT cr.id, cr.campaign_id, cr.delivery_retry_count
+     FROM campaign_recipients cr WHERE cr.id = ?`,
+    [recipientId]
+  );
+  if (!row) return { shouldRetry: false, reason: 'recipient_not_found' };
+  const retry = campaignRetryDecision(errorMessage, row.delivery_retry_count);
+  if (!retry.shouldRetry) return retry;
+  const message = `${errorMessage || 'Campaign send failed'} — automatic retry ${retry.retryCount}/${MAX_CAMPAIGN_DELIVERY_RETRIES} scheduled for ${retry.runAt}`;
+  await run(
+    `UPDATE campaign_recipients
+     SET status = 'retry_scheduled', error_message = ?, run_at = ?, sent_at = NULL, delivery_retry_count = ?
+     WHERE id = ?`,
+    [message, retry.runAt, retry.retryCount, recipientId]
+  );
+  await run(`UPDATE campaigns SET status = 'running' WHERE id = ?`, [row.campaign_id]);
+  return { ...retry, message };
+}
+
+/** Upgrade previously terminal transient failures into the automatic retry queue. */
+export async function scheduleExistingCampaignRetries(limit = 100) {
+  const failed = await all(
+    `SELECT id, campaign_id, error_message, delivery_retry_count
+     FROM campaign_recipients
+     WHERE status = 'failed' AND delivery_retry_count < ?
+     ORDER BY run_at ASC NULLS FIRST
+     LIMIT ?`,
+    [MAX_CAMPAIGN_DELIVERY_RETRIES, limit]
+  );
+  let scheduled = 0;
+  for (const row of failed) {
+    const retry = campaignRetryDecision(row.error_message, row.delivery_retry_count);
+    if (!retry.shouldRetry) continue;
+    const message = `${row.error_message || 'Campaign send failed'} — automatic retry ${retry.retryCount}/${MAX_CAMPAIGN_DELIVERY_RETRIES} scheduled for ${retry.runAt}`;
+    await run(
+      `UPDATE campaign_recipients
+       SET status = 'retry_scheduled', error_message = ?, run_at = ?, sent_at = NULL, delivery_retry_count = ?
+       WHERE id = ? AND status = 'failed'`,
+      [message, retry.runAt, retry.retryCount, row.id]
+    );
+    await run(
+      `UPDATE campaigns SET failed = GREATEST(0, failed - 1), status = 'running' WHERE id = ?`,
+      [row.campaign_id]
+    );
+    scheduled++;
+  }
+  return scheduled;
 }
 
 // ─── Notification Idempotency ──────────────────────────────────────────────
@@ -735,7 +811,7 @@ export async function getCampaignById(id) {
   c.steps = JSON.parse(c.steps || '[]');
   c.trigger_conditions = JSON.parse(c.trigger_conditions || '[]');
   const recipients = await all(
-    `SELECT id, row_index, phone, name, email, order_reference, variables, step_variables, current_step, last_shopify_status, status, error_message, run_at, sent_at
+    `SELECT id, row_index, phone, name, email, order_reference, variables, step_variables, current_step, last_shopify_status, status, error_message, run_at, sent_at, delivery_retry_count
      FROM campaign_recipients WHERE campaign_id = ? ORDER BY row_index ASC`,
     [id]
   );
@@ -790,7 +866,7 @@ export async function getDueCampaignRecipients(limit = 20) {
     `SELECT cr.*, c.template_name, c.language, c.category, c.steps, c.shopify_check_mode
      FROM campaign_recipients cr
      JOIN campaigns c ON c.id = cr.campaign_id
-     WHERE cr.status = 'pending' AND cr.run_at IS NOT NULL AND cr.run_at <= ? AND c.status = 'running'
+     WHERE cr.status IN ('pending', 'retry_scheduled') AND cr.run_at IS NOT NULL AND cr.run_at <= ? AND c.status = 'running'
      ORDER BY cr.run_at ASC LIMIT ?`,
     [new Date().toISOString(), limit]
   );
@@ -860,7 +936,7 @@ export async function finalizeCampaignIfDone(id) {
   const row = await get(
     `SELECT c.enrollment_source,
        (SELECT COUNT(*) FROM campaign_recipients cr
-        WHERE cr.campaign_id = c.id AND cr.status IN ('pending', 'accepted', 'sent')) AS pending
+        WHERE cr.campaign_id = c.id AND cr.status IN ('pending', 'retry_scheduled', 'accepted', 'sent')) AS pending
      FROM campaigns c WHERE c.id = ?`,
     [id]
   );
@@ -878,7 +954,7 @@ export async function retryFailedRecipients(id) {
   if (!campaign) throw new Error('Campaign not found');
   const failed = await all(`SELECT id FROM campaign_recipients WHERE campaign_id = ? AND status = 'failed'`, [id]);
   if (failed.length === 0) return 0;
-  await run(`UPDATE campaign_recipients SET status = 'pending', error_message = NULL, run_at = NULL, sent_at = NULL WHERE campaign_id = ? AND status = 'failed'`, [id]);
+  await run(`UPDATE campaign_recipients SET status = 'pending', error_message = NULL, run_at = NULL, sent_at = NULL, delivery_retry_count = 0 WHERE campaign_id = ? AND status = 'failed'`, [id]);
   await run(`UPDATE campaigns SET failed = 0 WHERE id = ?`, [id]);
   await startCampaign(id); // reassigns run_at to all pending and marks running
   return failed.length;
@@ -924,7 +1000,7 @@ export async function retryRecipient(recipientId) {
     await run(`UPDATE campaigns SET failed = GREATEST(0, failed - 1) WHERE id = ?`, [rec.campaign_id]);
   }
   await run(
-    `UPDATE campaign_recipients SET status = 'pending', error_message = NULL, run_at = ?, sent_at = NULL WHERE id = ?`,
+    `UPDATE campaign_recipients SET status = 'pending', error_message = NULL, run_at = ?, sent_at = NULL, delivery_retry_count = 0 WHERE id = ?`,
     [new Date().toISOString(), recipientId]
   );
   await run(

@@ -1,4 +1,7 @@
-import { getPendingJobs, markJobStatus, getFlowById, logTransaction, getTransactionById } from './db.js';
+import {
+  getPendingJobs, markJobStatus, getFlowById, logTransaction, getTransactionById,
+  scheduleExistingCampaignRetries
+} from './db.js';
 import { executeFlowNode } from './chatwoot.js';
 import { processDueCampaignMessages, reconcileCampaignDeliveryStatuses } from './campaigns.js';
 import { processDueRetries } from './retries.js';
@@ -7,6 +10,7 @@ import { processDueRecoveryJobs } from './recovery.js';
 let schedulerTimer = null;
 let campaignTimer = null;
 let campaignDeliveryTimer = null;
+let campaignRetryTimer = null;
 let retryTimer = null;
 let recoveryTimer = null;
 
@@ -28,6 +32,16 @@ export function startScheduler() {
     }, 30_000);
     reconcileCampaignDeliveryStatuses().catch(err => console.error('[Scheduler] Initial campaign delivery reconciliation error:', err.message));
   }
+  if (!campaignRetryTimer) {
+    const queueRetries = async () => {
+      const count = await scheduleExistingCampaignRetries(100);
+      if (count > 0) console.log(`[Scheduler] Scheduled ${count} failed campaign message retry/retries`);
+    };
+    campaignRetryTimer = setInterval(() => {
+      queueRetries().catch(err => console.error('[Scheduler] Campaign retry scheduling error:', err.message));
+    }, 5 * 60_000);
+    queueRetries().catch(err => console.error('[Scheduler] Initial campaign retry scheduling error:', err.message));
+  }
   if (!retryTimer) {
     retryTimer = setInterval(() => {
       processDueRetries().catch(err => console.error('[Scheduler] Retry tick error:', err.message));
@@ -47,6 +61,7 @@ export function stopScheduler() {
   if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
   if (campaignTimer) { clearInterval(campaignTimer); campaignTimer = null; }
   if (campaignDeliveryTimer) { clearInterval(campaignDeliveryTimer); campaignDeliveryTimer = null; }
+  if (campaignRetryTimer) { clearInterval(campaignRetryTimer); campaignRetryTimer = null; }
   if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
   if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null; }
   console.log('[Scheduler] Stopped');

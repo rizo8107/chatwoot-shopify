@@ -33,7 +33,7 @@ interface Recipient {
   id: string; row_index: number; phone: string; name: string;
   variables: Record<string, string>; status: string; error_message?: string;
   current_step: number; last_shopify_status?: string; order_reference?: string; email?: string;
-  run_at?: string; sent_at?: string;
+  run_at?: string; sent_at?: string; delivery_retry_count?: number;
 }
 
 interface CampaignDetail extends CampaignSummary {
@@ -123,7 +123,7 @@ function statusBadge(s: string) {
   const cls: Record<string, string> = {
     completed: 'success', delivered: 'success', read: 'success',
     sent: 'processing', accepted: 'processing', running: 'processing',
-    pending: 'pending', paused: 'delayed', draft: 'pending', failed: 'failed', skipped: 'delayed',
+    pending: 'pending', retry_scheduled: 'delayed', paused: 'delayed', draft: 'pending', failed: 'failed', skipped: 'delayed',
     enrolled: 'success', filtered: 'delayed'
   };
   return <span className={`badge ${cls[s] || 'pending'}`}><span className="badge-dot" />{s}</span>;
@@ -973,7 +973,14 @@ function CampaignDetailView({ id, kind, onBack }: { id: string; kind: CampaignKi
                   {kind === 'drip' && <><td className="text-sm">{Math.min((r.current_step || 0) + 1, c.steps?.length || 1)} / {c.steps?.length || 1}</td>
                   <td className="text-sm">{r.last_shopify_status || '—'}</td></>}
                   {c.param_mapping.map((_, i) => <td key={i} className="text-sm">{r.variables[String(i + 1)] ?? ''}</td>)}
-                  <td>{statusBadge(r.status)}</td>
+                  <td>
+                    {statusBadge(r.status)}
+                    {r.status === 'retry_scheduled' && r.run_at && (
+                      <div className="text-dim" style={{ fontSize: 11, marginTop: 4, whiteSpace: 'nowrap' }}>
+                        Retry {r.delivery_retry_count || 1}/2 · {new Date(r.run_at).toLocaleString()}
+                      </div>
+                    )}
+                  </td>
                   <td style={{ maxWidth: 220 }}>
                     {r.error_message && <span className="text-sm" style={{ color: 'var(--red)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.error_message}>{r.error_message}</span>}
                   </td>

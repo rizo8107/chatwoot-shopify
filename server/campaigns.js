@@ -11,7 +11,8 @@ import {
   setTransactionChatwootMessageId,
   getWebhookDripCampaigns,
   enrollCampaignRecipient,
-  updateDeliveryStatusByMessageId
+  updateDeliveryStatusByMessageId,
+  scheduleCampaignRetry
 } from './db.js';
 import {
   normalizePhone, renderTemplateBody, resolveContactId, resolveConversationId,
@@ -190,7 +191,8 @@ async function sendOne(recipient, settings) {
   const stepIndex = Number(recipient.current_step || 0);
   const campaignStep = steps[stepIndex];
   const campaignId = recipient.campaign_id;
-  const txId = `cmp_${recipient.id}_s${stepIndex}`;
+  const attempt = Math.max(0, Number(recipient.delivery_retry_count || 0));
+  const txId = `cmp_${recipient.id}_s${stepIndex}_a${attempt}`;
   const logId = `${txId}_log`;
   const variables = stepVariables[stepIndex] || legacyVariables;
   const bodyVariables = Object.fromEntries(
@@ -261,7 +263,12 @@ async function sendOne(recipient, settings) {
       step_index: stepIndex, template_name: campaignStep.template_name || recipient.template_name,
       status: 'accepted', shopify_status: shopifyCheck?.status,
       chatwoot_message_id: result.chatwootMessageId,
-      details: { contactId: result.contactId, conversationId: result.conversationId, nextStep: hasNextStep ? stepIndex + 1 : null }
+      details: {
+        contactId: result.contactId,
+        conversationId: result.conversationId,
+        nextStep: hasNextStep ? stepIndex + 1 : null,
+        attempt: attempt + 1
+      }
     });
     await logTransaction({
       id: txId, flow_id: null,
@@ -283,20 +290,25 @@ async function sendOne(recipient, settings) {
     }
     console.log(`[Campaign] Chatwoot accepted step ${stepIndex + 1}/${steps.length} for ${recipient.phone} (campaign ${campaignId})`);
   } catch (err) {
-    await markRecipientStatus(recipient.id, 'failed', err.message);
-    await incrementCampaignCounter(campaignId, 'failed');
+    const retry = await scheduleCampaignRetry(recipient.id, err.message);
+    const terminalFailure = !retry.shouldRetry;
+    if (terminalFailure) {
+      await markRecipientStatus(recipient.id, 'failed', err.message);
+      await incrementCampaignCounter(campaignId, 'failed');
+    }
     await logCampaignMessage({
       id: logId, campaign_id: campaignId, recipient_id: recipient.id,
       step_index: stepIndex, template_name: campaignStep?.template_name || recipient.template_name,
       status: 'failed', shopify_status: shopifyCheck?.status,
-      error_message: err.message, details: { shopify: shopifyCheck }
+      error_message: retry.message || err.message,
+      details: { shopify: shopifyCheck, attempt: attempt + 1, retry: retry.shouldRetry ? retry : null }
     });
     await logTransaction({
       id: txId, flow_id: null,
       order_number: recipient.order_reference || bodyVariables['1'] || null, customer_name: recipient.name, phone_number: recipient.phone,
       status: 'failed', type: 'campaign', steps: [], error_message: err.message
     });
-    console.error(`[Campaign] Failed for ${recipient.phone}: ${err.message}`);
+    console.error(`[Campaign] Failed for ${recipient.phone}: ${retry.message || err.message}`);
   }
 
   await finalizeCampaignIfDone(campaignId);
