@@ -379,6 +379,43 @@ async function findExistingContactId(apiBaseUrl, accountId, token, { email, phon
   return null;
 }
 
+async function filterContactByPhone(apiBaseUrl, accountId, token, phone) {
+  if (!phone) return null;
+  try {
+    const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/filter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', api_access_token: token },
+      body: JSON.stringify({
+        payload: [{
+          attribute_key: 'phone_number',
+          filter_operator: 'equal_to',
+          values: [phone],
+          query_operator: null
+        }]
+      })
+    });
+    if (!r.ok) return null;
+    const b = await r.json();
+    const list = Array.isArray(b) ? b : (b.payload || []);
+    return list[0]?.id || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function contactIdFromCreateResponse(body) {
+  return body?.payload?.contact?.id || body?.payload?.id || body?.contact?.id || body?.id || null;
+}
+
+function chatwootErrorDetail(body) {
+  const detail = body?.message || body?.error || body?.errors;
+  if (!detail) return '';
+  const text = typeof detail === 'string' ? detail : JSON.stringify(detail);
+  return text ? `: ${text.slice(0, 500)}` : '';
+}
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 function isUsefulContactName(name) {
   const value = String(name || '').trim();
   if (!value || /^(customer|valued customer)$/i.test(value)) return false;
@@ -413,17 +450,49 @@ export async function resolveContactId({ apiBaseUrl, accountId, token, inboxId, 
   const create = async (withEmail) => {
     const body = { inbox_id: inboxId, name, phone_number: phone };
     if (withEmail && email) body.email = email;
-    const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/contacts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', api_access_token: token },
-      body: JSON.stringify(body)
-    });
-    const b = await r.json().catch(() => ({}));
-    return { r, b };
+    try {
+      const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/contacts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', api_access_token: token },
+        body: JSON.stringify(body)
+      });
+      const b = await r.json().catch(() => ({}));
+      return { r, b };
+    } catch (error) {
+      return {
+        r: { ok: false, status: 0 },
+        b: { message: error?.message || 'Network error while creating contact' }
+      };
+    }
   };
 
-  let { r, b } = await create(true);
-  if (r.ok) return b.payload?.contact?.id || b.id || b.contact?.id;
+  const createWithRetry = async withEmail => {
+    let result;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      result = await create(withEmail);
+      if (result.r.ok) {
+        const createdId = contactIdFromCreateResponse(result.b);
+        if (createdId) return { ...result, id: createdId };
+      }
+
+      const retryable = result.r.ok || result.r.status === 0 || result.r.status === 429 || result.r.status >= 500;
+      if (!retryable) return result;
+
+      // Chatwoot can return 5xx after committing the contact. Let search
+      // indexing settle and reuse that contact before another create attempt.
+      await wait(attempt === 0 ? 150 : 500);
+      const searchedId = await findExistingContactId(apiBaseUrl, accountId, token, { phone, sourceId, email });
+      const exactId = searchedId || await filterContactByPhone(apiBaseUrl, accountId, token, phone);
+      if (exactId) return { ...result, id: exactId };
+    }
+    return result;
+  };
+
+  let { r, b, id: createdId } = await createWithRetry(true);
+  if (createdId) {
+    await updateContactName(apiBaseUrl, accountId, token, createdId, name);
+    return createdId;
+  }
 
   if (r.status === 422) {
     // Already exists (phone or email) — find and reuse it
@@ -433,8 +502,11 @@ export async function resolveContactId({ apiBaseUrl, accountId, token, inboxId, 
       return id;
     }
     // Email belongs to a different contact — create with phone only
-    ({ r, b } = await create(false));
-    if (r.ok) return b.payload?.contact?.id || b.id || b.contact?.id;
+    ({ r, b, id: createdId } = await createWithRetry(false));
+    if (createdId) {
+      await updateContactName(apiBaseUrl, accountId, token, createdId, name);
+      return createdId;
+    }
     id = await findExistingContactId(apiBaseUrl, accountId, token, { phone, sourceId });
     if (id) {
       await updateContactName(apiBaseUrl, accountId, token, id, name);
@@ -442,7 +514,8 @@ export async function resolveContactId({ apiBaseUrl, accountId, token, inboxId, 
     }
   }
 
-  throw new Error(`Could not find or create contact (HTTP ${r.status}${b?.message ? ': ' + b.message : ''})`);
+  const status = r.status || 'network error';
+  throw new Error(`Could not find or create contact (HTTP ${status}${chatwootErrorDetail(b)})`);
 }
 
 /**

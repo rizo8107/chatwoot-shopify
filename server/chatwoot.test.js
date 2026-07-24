@@ -5,6 +5,7 @@ import {
   buildTemplateButtonParams,
   buildTemplateHeaderParams,
   requireApprovedTemplate,
+  resolveContactId,
   resolveConversationId,
   sendWhatsAppTemplate
 } from './chatwoot.js';
@@ -151,6 +152,86 @@ test('template metadata includes required image header details', async () => {
       exampleUrl: 'https://cdn.example.com/sample.jpg'
     });
     assert.equal(template.bodyParamCount, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('contact creation retries a transient Chatwoot 500', async () => {
+  const originalFetch = global.fetch;
+  let createAttempts = 0;
+  const calls = [];
+  global.fetch = async (url, options = {}) => {
+    const method = options.method || 'GET';
+    calls.push({ url: String(url), method });
+    if (String(url).includes('/contacts/search')) {
+      return { ok: true, status: 200, json: async () => ({ payload: [] }) };
+    }
+    if (String(url).endsWith('/contacts/filter')) {
+      return { ok: true, status: 200, json: async () => ({ payload: [] }) };
+    }
+    if (String(url).endsWith('/contacts') && method === 'POST') {
+      createAttempts++;
+      if (createAttempts === 1) {
+        return { ok: false, status: 500, json: async () => ({ message: 'Temporary database error' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ payload: { contact: { id: 91 } } }) };
+    }
+    if (method === 'PUT') {
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  };
+  try {
+    const id = await resolveContactId({
+      apiBaseUrl: baseSettings.CHATWOOT_API_URL,
+      accountId: '1',
+      token: 'test-token',
+      inboxId: 1,
+      name: 'Vaishu Palani',
+      phone: '+919884448433',
+      sourceId: '919884448433'
+    });
+    assert.equal(id, 91);
+    assert.equal(createAttempts, 2);
+    assert.equal(calls.filter(call => call.url.endsWith('/contacts') && call.method === 'POST').length, 2);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('contact creation reuses a contact committed before Chatwoot returned 500', async () => {
+  const originalFetch = global.fetch;
+  let searchCalls = 0;
+  let createAttempts = 0;
+  global.fetch = async (url, options = {}) => {
+    const method = options.method || 'GET';
+    if (String(url).includes('/contacts/search')) {
+      searchCalls++;
+      const payload = searchCalls >= 3 ? [{ id: 92, phone_number: '+919884448433' }] : [];
+      return { ok: true, status: 200, json: async () => ({ payload }) };
+    }
+    if (String(url).endsWith('/contacts') && method === 'POST') {
+      createAttempts++;
+      return { ok: false, status: 500, json: async () => ({ message: 'Internal server error' }) };
+    }
+    if (method === 'PUT') {
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  };
+  try {
+    const id = await resolveContactId({
+      apiBaseUrl: baseSettings.CHATWOOT_API_URL,
+      accountId: '1',
+      token: 'test-token',
+      inboxId: 1,
+      name: 'Vaishu Palani',
+      phone: '+919884448433',
+      sourceId: '919884448433'
+    });
+    assert.equal(id, 92);
+    assert.equal(createAttempts, 1);
   } finally {
     global.fetch = originalFetch;
   }
