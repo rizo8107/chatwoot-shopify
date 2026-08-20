@@ -483,6 +483,16 @@ function FlowList({ onEdit, onCreate }: { onEdit: (f: Flow) => void; onCreate: (
   const [webhookUrl, setWebhookUrl] = useState('');
   const [copied, setCopied] = useState(false);
   const [webhookInfo, setWebhookInfo] = useState<any>(null);
+  const [recoverySince, setRecoverySince] = useState(() => {
+    const date = new Date();
+    date.setDate(date.getDate() - 7);
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+    return local.toISOString().slice(0, 10);
+  });
+  const [recoveryScan, setRecoveryScan] = useState<any>(null);
+  const [recoveryJob, setRecoveryJob] = useState<any>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryError, setRecoveryError] = useState('');
 
   const load = async () => {
     setLoading(true);
@@ -497,6 +507,53 @@ function FlowList({ onEdit, onCreate }: { onEdit: (f: Flow) => void; onCreate: (
   };
 
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    if (!recoveryJob?.id || !['running'].includes(recoveryJob.status)) return;
+    const timer = window.setInterval(async () => {
+      const response = await fetch(`${API}/flows/recovery/${recoveryJob.id}`);
+      const data = await response.json();
+      setRecoveryJob(data);
+      if (data.status !== 'running') setRecoveryBusy(false);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [recoveryJob?.id, recoveryJob?.status]);
+
+  const recoveryStartIso = () => new Date(`${recoverySince}T00:00:00`).toISOString();
+
+  const scanMissed = async () => {
+    setRecoveryBusy(true);
+    setRecoveryError('');
+    setRecoveryJob(null);
+    try {
+      const response = await fetch(`${API}/flows/recovery/scan`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ since: recoveryStartIso() })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Recovery scan failed');
+      setRecoveryScan(data);
+    } catch (error: any) { setRecoveryError(error.message); }
+    setRecoveryBusy(false);
+  };
+
+  const sendMissed = async () => {
+    if (!recoveryScan?.totalEligible) return;
+    if (!confirm(`Send ${recoveryScan.totalEligible} recovered Shopify message(s)? Existing successful sends will be skipped.`)) return;
+    setRecoveryBusy(true);
+    setRecoveryError('');
+    const response = await fetch(`${API}/flows/recovery/send`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ since: recoveryStartIso() })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setRecoveryError(data.error || 'Could not start recovery');
+      setRecoveryBusy(false);
+      return;
+    }
+    setRecoveryJob({ id: data.jobId, status: 'running', progress: { attempted: 0, totalEligible: recoveryScan.totalEligible } });
+  };
 
   const toggle = async (flow: Flow) => {
     await fetch(`${API}/flows/${flow.id}/toggle`, {
@@ -559,6 +616,46 @@ function FlowList({ onEdit, onCreate }: { onEdit: (f: Flow) => void; onCreate: (
             </div>
           </div>
         )}
+      </div>
+
+      <div className="card mb-4">
+        <div className="card-header">
+          <div>
+            <div className="card-title">Missed Event Recovery</div>
+            <div className="card-sub">Cross-check Shopify after downtime, skip successful sends, and deliver one current-state message per order.</div>
+          </div>
+        </div>
+        <div className="flex gap-2" style={{ alignItems: 'end', flexWrap: 'wrap' }}>
+          <label style={{ minWidth: 190 }}>
+            <span className="text-sm text-dim" style={{ display: 'block', marginBottom: 6 }}>Recover orders since</span>
+            <input className="input" type="date" value={recoverySince} onChange={event => { setRecoverySince(event.target.value); setRecoveryScan(null); }} />
+          </label>
+          <button className="btn btn-secondary" disabled={recoveryBusy || !recoverySince} onClick={scanMissed}>
+            {recoveryBusy && !recoveryJob ? 'Scanning…' : 'Scan Shopify'}
+          </button>
+          {recoveryScan && (
+            <button className="btn btn-primary" disabled={recoveryBusy || recoveryScan.totalEligible === 0} onClick={sendMissed}>
+              Recover {recoveryScan.totalEligible} messages
+            </button>
+          )}
+        </div>
+        {recoveryScan && (
+          <div className="flex gap-2" style={{ marginTop: 14, flexWrap: 'wrap' }}>
+            <span className="badge pending">{recoveryScan.scanned} orders scanned</span>
+            <span className="badge success">{recoveryScan.confirmation} confirmations</span>
+            <span className="badge success">{recoveryScan.shipping} shipping updates</span>
+            <span className="badge">{recoveryScan.alreadySent} already sent</span>
+            {(recoveryScan.skippedMissingTracking + recoveryScan.skippedMissingPhone) > 0 && (
+              <span className="badge failed">{recoveryScan.skippedMissingTracking + recoveryScan.skippedMissingPhone} need attention</span>
+            )}
+          </div>
+        )}
+        {recoveryJob?.progress && (
+          <div className="alert info" style={{ marginTop: 14 }}>
+            Recovery {recoveryJob.status}: {recoveryJob.progress.attempted || 0}/{recoveryJob.progress.totalEligible || 0} checked, {recoveryJob.progress.sent || 0} sent, {recoveryJob.progress.skipped || 0} skipped, {recoveryJob.progress.failed || 0} failed.
+          </div>
+        )}
+        {recoveryError && <div className="alert error" style={{ marginTop: 14 }}>{recoveryError}</div>}
       </div>
 
       {/* Flows Table */}

@@ -67,6 +67,7 @@ import {
 import { startScheduler } from './scheduler.js';
 import { scheduleRecoveryForCart, cancelRecoveryForOrder } from './recovery.js';
 import { enrollWebhookDripCampaigns } from './campaigns.js';
+import { auditMissedShopifyMessages, sendMissedShopifyMessages } from './shopifyBackfill.js';
 
 dotenv.config();
 
@@ -507,6 +508,47 @@ app.post('/api/abandoned-cart-flows/:id/toggle', async (req, res) => {
 });
 
 // ─── Flows CRUD ───────────────────────────────────────────────────────────
+
+const backfillRuns = new Map();
+let activeBackfillJobId = null;
+
+app.post('/api/flows/recovery/scan', async (req, res) => {
+  try {
+    const { summary } = await auditMissedShopifyMessages(req.body?.since);
+    res.json(summary);
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.post('/api/flows/recovery/send', async (req, res) => {
+  if (activeBackfillJobId && backfillRuns.get(activeBackfillJobId)?.status === 'running') {
+    return res.status(409).json({ error: 'A missed-event recovery is already running', jobId: activeBackfillJobId });
+  }
+  const since = req.body?.since;
+  const jobId = genId('backfill');
+  activeBackfillJobId = jobId;
+  const state = { id: jobId, status: 'running', progress: null, error: null, started_at: new Date().toISOString() };
+  backfillRuns.set(jobId, state);
+  sendMissedShopifyMessages(since, progress => {
+    state.progress = { ...progress, errors: progress.errors.slice(-20) };
+  }).then(result => {
+    state.status = result.failed > 0 ? 'completed_with_errors' : 'completed';
+    state.progress = result;
+    state.completed_at = new Date().toISOString();
+    activeBackfillJobId = null;
+  }).catch(error => {
+    state.status = 'failed';
+    state.error = error.message;
+    state.completed_at = new Date().toISOString();
+    activeBackfillJobId = null;
+  });
+  res.status(202).json({ success: true, jobId });
+});
+
+app.get('/api/flows/recovery/:jobId', (req, res) => {
+  const state = backfillRuns.get(req.params.jobId);
+  if (!state) return res.status(404).json({ error: 'Recovery run not found' });
+  res.json(state);
+});
 
 app.get('/api/flows', async (req, res) => {
   try { res.json(await getFlows()); }

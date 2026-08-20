@@ -371,6 +371,24 @@ export async function getTransactions(limit = 100, offset = 0, status = null) {
   );
 }
 
+/** Template sends already completed for an order, used by Shopify backfills. */
+export async function getSuccessfulTemplateSendsSince(since) {
+  const rows = await all(
+    `SELECT order_number, steps FROM transactions
+     WHERE (status = 'success' OR (status = 'processing' AND chatwoot_message_id IS NOT NULL))
+       AND created_at >= ? AND NULLIF(order_number, '') IS NOT NULL`,
+    [since]
+  );
+  const sends = [];
+  for (const row of rows) {
+    const templates = String(row.steps || '').match(/order_confirmation_01|order_shipped/g) || [];
+    for (const template of new Set(templates)) {
+      sends.push({ orderNumber: String(row.order_number).replace(/^#/, ''), template });
+    }
+  }
+  return sends;
+}
+
 export async function getTransactionById(id) {
   const row = await get(`SELECT * FROM transactions WHERE id = ?`, [id]);
   if (row && row.steps) row.steps = JSON.parse(row.steps);
