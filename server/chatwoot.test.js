@@ -4,6 +4,8 @@ import {
   assertParamsComplete,
   buildTemplateButtonParams,
   buildTemplateHeaderParams,
+  ensureContactInboxSource,
+  normalizeChatwootSourceId,
   normalizePhone,
   requireApprovedTemplate,
   resolveContactByUniqueExactName,
@@ -104,6 +106,52 @@ test('Excel scientific-notation phone numbers are rejected without losing digits
     normalizePhone('+919994874789', ''),
     { cleanPhone: '919994874789', formattedPhone: '+919994874789', sourceId: '919994874789', invalidReason: null }
   );
+});
+
+test('Chatwoot source IDs are normalized and validated before conversation creation', () => {
+  assert.equal(normalizeChatwootSourceId('+91 98844-48433'), '919884448433');
+  assert.equal(normalizeChatwootSourceId('IN.1557570669054718'), 'IN.1557570669054718');
+  assert.throws(() => normalizeChatwootSourceId('9.19995E+11'), /Invalid Chatwoot WhatsApp source ID/);
+  assert.throws(() => normalizeChatwootSourceId(''), /Invalid Chatwoot WhatsApp source ID/);
+});
+
+test('a missing contact-inbox association is created before a conversation', async () => {
+  const originalFetch = global.fetch;
+  const requests = [];
+  global.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    if (!options.method) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ payload: { id: 964, contact_inboxes: [] } })
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ source_id: '919884448433', inbox: { id: 1 } })
+    };
+  };
+  try {
+    const sourceId = await ensureContactInboxSource({
+      apiBaseUrl: baseSettings.CHATWOOT_API_URL,
+      accountId: '1',
+      token: 'test-token',
+      inboxId: 1,
+      contactId: 964,
+      sourceId: '+919884448433'
+    });
+    assert.equal(sourceId, '919884448433');
+    const createRequest = requests[1];
+    assert.match(createRequest.url, /contacts\/964\/contact_inboxes$/);
+    assert.deepEqual(JSON.parse(createRequest.options.body), {
+      inbox_id: 1,
+      source_id: '919884448433'
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test('a unique exact-name contact can recover its WhatsApp inbox source ID', async () => {
@@ -338,7 +386,76 @@ test('a conversation is created only when none is reusable', async () => {
     });
     assert.equal(result.id, 77);
     assert.equal(result.reused, false);
-    assert.equal(request, 2);
+    assert.equal(request, 4);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('a duplicate WhatsApp source owner is merged into the selected contact', async () => {
+  const originalFetch = global.fetch;
+  const requests = [];
+  global.fetch = async (url, options = {}) => {
+    const request = {
+      url: String(url),
+      method: options.method || 'GET',
+      body: options.body ? JSON.parse(options.body) : null
+    };
+    requests.push(request);
+
+    if (request.url.endsWith('/contacts/964/conversations')) {
+      return { ok: true, status: 200, json: async () => ({ payload: [] }) };
+    }
+    if (request.url.endsWith('/contacts/964') && request.method === 'GET') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ payload: { id: 964, phone_number: '+919884448433', contact_inboxes: [] } })
+      };
+    }
+    if (request.url.endsWith('/contacts/964/contact_inboxes')) {
+      return {
+        ok: false,
+        status: 422,
+        json: async () => ({
+          message: 'Source invalid source id for whatsapp inbox. valid Regex',
+          attributes: ['source_id']
+        })
+      };
+    }
+    if (request.url.endsWith('/conversations')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 1457, meta: { sender: { id: 643 } } })
+      };
+    }
+    if (request.url.endsWith('/actions/contact_merge')) {
+      return { ok: true, status: 200, json: async () => ({ id: 964 }) };
+    }
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  };
+
+  try {
+    const result = await resolveConversationId({
+      apiBaseUrl: baseSettings.CHATWOOT_API_URL,
+      accountId: '1',
+      token: 'test-token',
+      inboxId: 1,
+      contactId: 964,
+      sourceId: '919884448433',
+      settings: baseSettings
+    });
+    assert.equal(result.id, 1457);
+    assert.equal(result.repairedDuplicateContact, true);
+    assert.deepEqual(
+      requests.find(request => request.url.endsWith('/conversations') && request.method === 'POST').body,
+      { source_id: '919884448433', status: 'open' }
+    );
+    assert.deepEqual(
+      requests.find(request => request.url.endsWith('/actions/contact_merge')).body,
+      { base_contact_id: 964, mergee_contact_id: 643 }
+    );
   } finally {
     global.fetch = originalFetch;
   }

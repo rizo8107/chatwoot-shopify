@@ -161,7 +161,7 @@ app.get('/api/health', (_req, res) => {
 
 // The HTTP server starts before cloud database initialization completes. API
 // callers now receive a useful JSON 503 during that short window instead of
-// Vite reporting a 502 because nothing is listening on port 3000.
+// Vite reporting a 502 because nothing is listening on the configured API port.
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api') || backendReady) return next();
   return res.status(503).json({

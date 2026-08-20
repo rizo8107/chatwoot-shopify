@@ -7,7 +7,9 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        // Keep the local API separate from other apps that commonly use 3000.
+        // This must match PORT in the repository's development .env file.
+        target: 'http://localhost:3001',
         changeOrigin: true,
       }
     }

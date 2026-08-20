@@ -407,6 +407,97 @@ function whatsappSourceIdForContact(contact, inboxId) {
   return numericSources.length === 1 ? numericSources[0] : null;
 }
 
+export function normalizeChatwootSourceId(sourceId) {
+  const raw = String(sourceId || '').trim();
+  const normalized = /^[+\d\s().-]+$/.test(raw) ? raw.replace(/\D/g, '') : raw;
+  if (!/^(?:\d{1,15}|[A-Z]{2}\.(?:ENT\.)?[A-Za-z0-9]{1,128})$/.test(normalized)) {
+    throw new Error(`Invalid Chatwoot WhatsApp source ID "${raw || '(empty)'}"`);
+  }
+  return normalized;
+}
+
+export async function ensureContactInboxSource({
+  apiBaseUrl, accountId, token, inboxId, contactId, sourceId
+}) {
+  const candidate = normalizeChatwootSourceId(sourceId);
+  const headers = { api_access_token: token };
+  const contactUrl = `${apiBaseUrl}/api/v1/accounts/${accountId}/contacts/${contactId}`;
+  try {
+    const contactResponse = await fetch(contactUrl, { headers });
+    if (contactResponse.ok) {
+      const contactBody = await contactResponse.json();
+      const contact = contactBody.payload || contactBody;
+      const existingSource = whatsappSourceIdForContact(contact, inboxId);
+      if (existingSource) return normalizeChatwootSourceId(existingSource);
+    }
+  } catch (_) {
+    // Continue to the explicit contact-inbox create request.
+  }
+
+  const contactInboxUrl = `${contactUrl}/contact_inboxes`;
+  const response = await fetch(contactInboxUrl, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inbox_id: Number(inboxId), source_id: candidate })
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`Create contact inbox failed: ${response.status} ${JSON.stringify(body)}`);
+  }
+  return normalizeChatwootSourceId(body.source_id || candidate);
+}
+
+function isDuplicateWhatsappSourceError(error) {
+  const message = String(error?.message || '');
+  return message.includes('Create contact inbox failed: 422')
+    && message.includes('invalid source id for whatsapp inbox');
+}
+
+async function recoverDuplicateWhatsappSource({
+  apiBaseUrl, accountId, token, contactId, sourceId, settings
+}) {
+  const normalizedSourceId = normalizeChatwootSourceId(sourceId);
+  const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations`;
+  const body = { source_id: normalizedSourceId, status: 'open' };
+  const assigneeId = parseInt(settings?.CHATWOOT_AUTOMATION_ASSIGNEE_ID || '', 10);
+  if (Number.isInteger(assigneeId) && assigneeId > 0) body.assignee_id = assigneeId;
+
+  // Chatwoot 4.15 can report a valid numeric WhatsApp source as "invalid"
+  // when that source already belongs to an older duplicate contact. Creating
+  // by source alone resolves the actual source owner without inventing a new
+  // destination or sending to the wrong number.
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', api_access_token: token },
+    body: JSON.stringify(body)
+  });
+  const responseBody = await response.json().catch(() => ({}));
+  if (!response.ok || !responseBody.id) return null;
+
+  const sourceOwnerId = Number(responseBody?.meta?.sender?.id);
+  if (sourceOwnerId && sourceOwnerId !== Number(contactId)) {
+    // Keep the campaign-selected contact as the canonical record and move the
+    // WhatsApp source/conversations from the stale duplicate into it.
+    const mergeResponse = await fetch(
+      `${apiBaseUrl}/api/v1/accounts/${accountId}/actions/contact_merge`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', api_access_token: token },
+        body: JSON.stringify({
+          base_contact_id: Number(contactId),
+          mergee_contact_id: sourceOwnerId
+        })
+      }
+    );
+    if (!mergeResponse.ok) {
+      const mergeBody = await mergeResponse.json().catch(() => ({}));
+      throw new Error(`Repair duplicate WhatsApp contact failed: ${mergeResponse.status} ${JSON.stringify(mergeBody)}`);
+    }
+  }
+
+  return { id: responseBody.id, reused: false, response: responseBody, repairedDuplicateContact: true };
+}
+
 export async function resolveContactByUniqueExactName(apiBaseUrl, accountId, token, inboxId, name) {
   const normalizedName = String(name || '').trim().toLowerCase();
   if (!isUsefulContactName(name)) return null;
@@ -597,8 +688,21 @@ export async function resolveConversationId({ apiBaseUrl, accountId, token, inbo
     }
   } catch (_) { /* fall through to conversation creation */ }
 
+  let contactInboxSourceId;
+  try {
+    contactInboxSourceId = await ensureContactInboxSource({
+      apiBaseUrl, accountId, token, inboxId, contactId, sourceId
+    });
+  } catch (error) {
+    if (!isDuplicateWhatsappSourceError(error)) throw error;
+    const repaired = await recoverDuplicateWhatsappSource({
+      apiBaseUrl, accountId, token, contactId, sourceId, settings
+    });
+    if (repaired) return repaired;
+    throw error;
+  }
   const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations`;
-  const body = buildConversationBody({ contactId, inboxId, sourceId, settings });
+  const body = buildConversationBody({ contactId, inboxId, sourceId: contactInboxSourceId, settings });
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', api_access_token: token },
