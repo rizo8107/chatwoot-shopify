@@ -92,7 +92,7 @@ let shopifyWebhookSecret = process.env.SHOPIFY_API_SECRET || '';
 // ─── Auth gate ──────────────────────────────────────────────────────────────
 // Protects all /api routes except: auth endpoints, the Shopify webhook, and the
 // Shopify OAuth callback (machine-called, secured by HMAC). Credentials are
-// verified against InsForge Auth (server/auth.js); this app issues its own
+// verified against PostgreSQL users (server/auth.js); this app issues its own
 // short-lived session cookie afterward so per-request checks stay local.
 const PUBLIC_API = new Set([
   '/api/auth/login', '/api/auth/logout', '/api/auth/me',

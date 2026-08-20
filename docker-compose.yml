@@ -8,12 +8,13 @@ services:
     container_name: chatwoot-automation
     ports:
       - "3000:3000"
-    # Data now lives in InsForge (cloud Postgres) — no local volume needed.
+    # Data lives in standalone PostgreSQL — no local volume needed.
     environment:
       - PORT=3000
-      # InsForge connection string — provided via .env (not committed). See .env.example.
-      - INSFORGE_DATABASE_URL=${INSFORGE_DATABASE_URL}
-      # Optional fallbacks; live values are stored in the InsForge `settings` table.
+      # PostgreSQL connection — provided via .env (not committed). See .env.example.
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_SSL=${DATABASE_SSL:-true}
+      # Optional fallbacks; live values are stored in the PostgreSQL `settings` table.
       - CHATWOOT_API_URL=https://chat.stomatalfarms.com
       - CHATWOOT_ACCOUNT_ID=1
       - CHATWOOT_INBOX_ID=1

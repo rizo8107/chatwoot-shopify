@@ -5,19 +5,19 @@ import { campaignRetryDecision, MAX_CAMPAIGN_DELIVERY_RETRIES } from './campaign
 dotenv.config();
 
 // ─── InsForge (cloud Postgres) connection ────────────────────────────────────
-// Data lives in the InsForge backend, not a local file. The connection string
-// comes from the InsForge project (CLI: `insforge db connection-string`).
+// Application data can live in any compatible PostgreSQL database.
 
-const connectionString = process.env.INSFORGE_DATABASE_URL || process.env.DATABASE_URL;
+const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
-  throw new Error('INSFORGE_DATABASE_URL is not set — configure the InsForge Postgres connection string in .env');
+  throw new Error('DATABASE_URL is not set — configure the PostgreSQL connection string in .env');
 }
+const databaseSsl = String(process.env.DATABASE_SSL ?? 'true').toLowerCase() !== 'false';
 
 const pool = new pg.Pool({
   connectionString,
-  ssl: { rejectUnauthorized: false },
+  ssl: databaseSsl ? { rejectUnauthorized: false } : false,
   max: 10,
-  // Recycle idle connections before InsForge's own proxy silently drops them —
+  // Recycle idle connections before a proxy or server drops them —
   // an unexpected drop (ECONNRESET) can otherwise leave the pool holding a
   // dead connection slot indefinitely.
   idleTimeoutMillis: 30_000,
@@ -105,6 +105,15 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT
+    )
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS app_users (
+      email TEXT PRIMARY KEY,
+      password_hash TEXT NOT NULL,
+      email_verified BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TEXT NOT NULL
     )
   `);
 
@@ -306,7 +315,7 @@ export async function initDb() {
   `);
   await run(`CREATE INDEX IF NOT EXISTS idx_campaign_logs_campaign ON campaign_message_logs (campaign_id, created_at)`);
 
-  console.log('[DB] Initialized (InsForge Postgres)');
+  console.log('[DB] Initialized (PostgreSQL)');
 }
 
 // ─── Transactions ─────────────────────────────────────────────────────────
@@ -676,6 +685,13 @@ export async function getMetrics() {
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────
+
+export async function getAppUserByEmail(email) {
+  return get(
+    `SELECT email, password_hash, email_verified FROM app_users WHERE LOWER(email) = LOWER(?)`,
+    [String(email || '').trim()]
+  );
+}
 
 const SETTING_KEYS = [
   'CHATWOOT_API_URL', 'CHATWOOT_API_TOKEN', 'CHATWOOT_ACCOUNT_ID', 'CHATWOOT_INBOX_ID',

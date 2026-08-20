@@ -29,8 +29,7 @@ COPY --from=client-builder /app/client/dist ./client/dist
 # Setup production environment parameters
 ENV PORT=3000
 ENV NODE_ENV=production
-# Data is stored in InsForge (cloud Postgres). Provide the connection string at
-# runtime via INSFORGE_DATABASE_URL (e.g. docker run -e INSFORGE_DATABASE_URL=...).
+# Data is stored in PostgreSQL. Provide DATABASE_URL and DATABASE_SSL at runtime.
 
 # Expose backend application port
 EXPOSE 3000

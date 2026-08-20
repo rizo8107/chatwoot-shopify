@@ -238,7 +238,7 @@ export const Login: React.FC<{ onSuccess: () => void }> = ({ onSuccess }) => {
         )}
 
         <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)', textAlign: 'center' }}>
-          <span className="text-dim text-sm">Secured by InsForge · session expires after 7 days</span>
+          <span className="text-dim text-sm">Secured login · session expires after 7 days</span>
         </div>
       </div>
     </div>

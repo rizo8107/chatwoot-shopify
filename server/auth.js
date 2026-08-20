@@ -1,20 +1,18 @@
 import crypto from 'node:crypto';
 import dotenv from 'dotenv';
+import bcrypt from 'bcryptjs';
+import { getAppUserByEmail } from './db.js';
 
 dotenv.config();
 
-const INSFORGE_URL = (process.env.INSFORGE_URL || '').replace(/\/$/, '');
-
-// Stable signing secret for OUR OWN session cookie (independent of InsForge's
-// own tokens). Prefer an explicit AUTH_SECRET; fall back to the private
-// InsForge API key, which is already required and never exposed to the client.
+// Stable signing secret for the app's own session cookie.
 const SECRET = process.env.AUTH_SECRET
-  || (process.env.INSFORGE_API_KEY ? crypto.createHash('sha256').update(`session|${process.env.INSFORGE_API_KEY}`).digest('hex') : 'insecure-dev-secret');
+  || (process.env.DATABASE_URL ? crypto.createHash('sha256').update(`session|${process.env.DATABASE_URL}`).digest('hex') : 'insecure-dev-secret');
 
 export const COOKIE_NAME = 'app_session';
 const TTL_MS = 7 * 24 * 3600 * 1000; // 7 days
 
-/** Auth is always required — InsForge is the identity provider and is already a hard dependency. */
+/** Authentication is backed by the local PostgreSQL app_users table. */
 export function authConfigured() {
   return true;
 }
@@ -24,46 +22,23 @@ function sign(data) {
 }
 
 // ─── InsForge Auth (REST) ──────────────────────────────────────────────────
-// Calls InsForge's Auth API directly (mobile client_type — returns tokens in
-// the JSON body instead of relying on httpOnly cookies, which don't cross
-// from InsForge's domain to ours). Used only to verify credentials; this
-// app's own session cookie (below) is what actually gates /api routes.
-
-async function insforgeRequest(path, body) {
-  const res = await fetch(`${INSFORGE_URL}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  const data = await res.json().catch(() => ({}));
-  return { ok: res.ok, status: res.status, data };
-}
+// Password hashes and verification status are stored in app_users.
 
 export async function signInWithPassword(email, password) {
-  if (!INSFORGE_URL) return { ok: false, status: 500, message: 'INSFORGE_URL is not configured' };
-  const { ok, status, data } = await insforgeRequest('/api/auth/sessions?client_type=mobile', { email, password });
-  if (!ok) {
-    const message = status === 403
-      ? 'Email not verified. Check your inbox for a verification code.'
-      : (data?.message || 'Invalid email or password');
-    return { ok: false, status, message };
+  const user = await getAppUserByEmail(email);
+  if (!user || !password || !await bcrypt.compare(String(password), user.password_hash)) {
+    return { ok: false, status: 401, message: 'Invalid email or password' };
   }
-  return { ok: true, user: data.user };
+  if (!user.email_verified) return { ok: false, status: 403, message: 'Email is not verified' };
+  return { ok: true, user: { email: user.email } };
 }
 
-export async function sendResetPasswordEmail(email, redirectTo) {
-  const { ok, data } = await insforgeRequest('/api/auth/email/send-reset-password', { email, redirectTo });
-  return { ok, message: data?.message };
+export async function sendResetPasswordEmail() {
+  return { ok: false, message: 'Password reset email is not configured for standalone PostgreSQL' };
 }
 
-export async function resetPasswordWithCode(email, code, newPassword) {
-  const exchange = await insforgeRequest('/api/auth/email/exchange-reset-password-token', { email, code });
-  if (!exchange.ok || !exchange.data?.token) {
-    return { ok: false, message: exchange.data?.message || 'Invalid or expired code' };
-  }
-  const reset = await insforgeRequest('/api/auth/email/reset-password', { newPassword, otp: exchange.data.token });
-  if (!reset.ok) return { ok: false, message: reset.data?.message || 'Failed to reset password' };
-  return { ok: true };
+export async function resetPasswordWithCode() {
+  return { ok: false, message: 'Password reset is not configured for standalone PostgreSQL' };
 }
 
 // ─── App session cookie (unchanged mechanism, now backed by InsForge identity) ─
