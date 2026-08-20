@@ -84,7 +84,11 @@ app.use(express.json({
   }
 }));
 
-const PORT = process.env.PORT || 3000;
+// APP_PORT is the fixed port inside the production container. It deliberately
+// takes precedence over PORT because deployment platforms may inject a PORT
+// value that does not match Docker's EXPOSE/routing configuration. Local
+// development continues to use PORT=3001 from .env.
+const PORT = process.env.APP_PORT || process.env.PORT || 3000;
 let backendReady = false;
 let backendInitError = null;
 let shopifyWebhookSecret = process.env.SHOPIFY_API_SECRET || '';

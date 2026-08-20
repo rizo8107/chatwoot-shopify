@@ -27,12 +27,16 @@ COPY server/ ./server/
 COPY --from=client-builder /app/client/dist ./client/dist
 
 # Setup production environment parameters
-ENV PORT=3000
+ENV APP_PORT=3000
 ENV NODE_ENV=production
 # Data is stored in PostgreSQL. Provide DATABASE_URL and DATABASE_SSL at runtime.
 
 # Expose backend application port
 EXPOSE 3000
+
+# Let Docker/Coolify route traffic only after Express and PostgreSQL are ready.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1
 
 # Run Express server
 CMD ["node", "server/index.js"]
