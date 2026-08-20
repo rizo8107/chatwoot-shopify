@@ -28,9 +28,9 @@ export function startScheduler() {
   }
   if (!campaignDeliveryTimer) {
     campaignDeliveryTimer = setInterval(() => {
-      reconcileCampaignDeliveryStatuses().catch(err => console.error('[Scheduler] Campaign delivery reconciliation error:', err.message));
+      reconcileCampaignDeliveryStatuses().catch(err => console.error('[Scheduler] Delivery reconciliation error:', err.message));
     }, 30_000);
-    reconcileCampaignDeliveryStatuses().catch(err => console.error('[Scheduler] Initial campaign delivery reconciliation error:', err.message));
+    reconcileCampaignDeliveryStatuses().catch(err => console.error('[Scheduler] Initial delivery reconciliation error:', err.message));
   }
   if (!campaignRetryTimer) {
     const queueRetries = async () => {

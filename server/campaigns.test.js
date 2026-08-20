@@ -42,3 +42,27 @@ test('campaign delivery reconciliation fetches final Chatwoot statuses', async (
     global.fetch = originalFetch;
   }
 });
+
+test('delivery reconciliation accepts flow transaction records', async () => {
+  const originalFetch = global.fetch;
+  const updates = [];
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ payload: [{ id: 991, status: 'read', content_attributes: {} }] })
+  });
+
+  try {
+    await reconcileCampaignDeliveryStatuses({
+      getPending: async () => [{ chatwoot_message_id: '991', conversation_id: 77 }],
+      getSettings: async () => ({
+        CHATWOOT_API_URL: 'https://chat.example.test',
+        CHATWOOT_ACCOUNT_ID: '1',
+        CHATWOOT_API_TOKEN: 'test-token'
+      }),
+      updateStatus: async (id, status, error) => updates.push({ id, status, error })
+    });
+    assert.deepEqual(updates, [{ id: 991, status: 'read', error: null }]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});

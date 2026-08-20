@@ -3,6 +3,7 @@ import {
   getAllSettings,
   getDueCampaignRecipients,
   getPendingCampaignDeliveries,
+  getPendingTransactionDeliveries,
   markRecipientStatus,
   incrementCampaignCounter,
   finalizeCampaignIfDone,
@@ -120,7 +121,17 @@ export async function processDueCampaignMessages() {
 
 /** Poll Chatwoot as a fallback when a message_updated webhook is delayed or missed. */
 export async function reconcileCampaignDeliveryStatuses({
-  getPending = getPendingCampaignDeliveries,
+  getPending = async limit => {
+    const [campaigns, transactions] = await Promise.all([
+      getPendingCampaignDeliveries(limit),
+      getPendingTransactionDeliveries(Math.max(limit, 500))
+    ]);
+    const unique = new Map();
+    for (const item of [...campaigns, ...transactions]) {
+      unique.set(String(item.chatwoot_message_id), item);
+    }
+    return [...unique.values()];
+  },
   getSettings = getAllSettings,
   updateStatus = updateDeliveryStatusByMessageId
 } = {}) {
@@ -143,13 +154,14 @@ export async function reconcileCampaignDeliveryStatuses({
       byConversation.get(key).push(item);
     }
 
-    for (const [conversationId, items] of byConversation) {
+    const conversations = [...byConversation.entries()];
+    const reconcileConversation = async ([conversationId, items]) => {
       try {
         const response = await fetch(
           `${apiBaseUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`,
           { headers: { api_access_token: token } }
         );
-        if (!response.ok) continue;
+        if (!response.ok) return;
         const body = await response.json();
         const messages = Array.isArray(body) ? body : (body.payload || []);
         const messagesById = new Map(messages.map(message => [String(message.id), message]));
@@ -165,6 +177,11 @@ export async function reconcileCampaignDeliveryStatuses({
       } catch (error) {
         console.warn(`[Campaign] Delivery reconciliation failed for conversation ${conversationId}: ${error.message}`);
       }
+    };
+    // Keep reconciliation comfortably below Chatwoot's API limits while
+    // preventing a large recovery run from taking several minutes.
+    for (let index = 0; index < conversations.length; index += 10) {
+      await Promise.all(conversations.slice(index, index + 10).map(reconcileConversation));
     }
   } finally {
     reconcilingDeliveries = false;

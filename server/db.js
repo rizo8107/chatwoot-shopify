@@ -584,6 +584,33 @@ export async function getPendingCampaignDeliveries(limit = 100) {
   });
 }
 
+/** Flow/recovery sends awaiting a final WhatsApp delivery state. */
+export async function getPendingTransactionDeliveries(limit = 500) {
+  const rows = await all(
+    `SELECT chatwoot_message_id, steps
+     FROM transactions
+     WHERE chatwoot_message_id IS NOT NULL
+       AND status = 'processing'
+       AND COALESCE(delivery_status, 'sent') = 'sent'
+     ORDER BY created_at DESC
+     LIMIT ?`,
+    [limit]
+  );
+  return rows.map(row => {
+    let steps = [];
+    try { steps = JSON.parse(row.steps || '[]'); } catch (_) {}
+    const messageStep = [...(Array.isArray(steps) ? steps : [])].reverse().find(step =>
+      step?.response?.body?.conversation_id || step?.response?.body?.message?.conversation_id
+    );
+    return {
+      chatwoot_message_id: String(row.chatwoot_message_id),
+      conversation_id: messageStep?.response?.body?.conversation_id
+        || messageStep?.response?.body?.message?.conversation_id
+        || null
+    };
+  }).filter(item => item.conversation_id);
+}
+
 export async function scheduleCampaignRetry(recipientId, errorMessage) {
   const row = await get(
     `SELECT cr.id, cr.campaign_id, cr.delivery_retry_count
