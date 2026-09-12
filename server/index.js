@@ -61,7 +61,8 @@ import {
   extractCheckoutDetails,
   executeFlow,
   normalizePhone,
-  requireApprovedTemplate
+  requireApprovedTemplate,
+  fetchLiveTemplates
 } from './chatwoot.js';
 
 import { startScheduler } from './scheduler.js';
@@ -1092,67 +1093,41 @@ app.post('/api/test-flow/:flowId', async (req, res) => {
   }
 });
 
-// ─── WhatsApp Templates (from Chatwoot inbox) ─────────────────────────────
+// ─── WhatsApp Templates (from Chatwoot inbox & Meta Cloud API) ─────────────
 
 app.get('/api/whatsapp/templates', async (req, res) => {
   try {
     const settings = await getAllSettings();
-    const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
-    const token = settings.CHATWOOT_API_TOKEN;
-    const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
-    const inboxId = settings.CHATWOOT_INBOX_ID || '1';
-    if (!apiBaseUrl || !token) return res.status(400).json({ error: 'Chatwoot API not configured in Settings' });
+    const forceSync = req.query.sync === 'true' || req.query.sync === '1';
+    const result = await fetchLiveTemplates(settings, { forceSync });
+    const formatted = result.templates.map(t => ({
+      ...t,
+      header: t.header ? {
+        ...t.header,
+        required: ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(t.header.format || '').toUpperCase())
+      } : null
+    }));
+    res.json(formatted);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-    const url = `${apiBaseUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`;
-    const r = await fetch(url, { headers: { api_access_token: token } });
-    const body = await r.json();
-    if (!r.ok) return res.status(r.status).json({ error: `Chatwoot error ${r.status}`, detail: body });
-
-    const raw = body.message_templates || body.payload?.message_templates || [];
-    const templates = raw.map(t => {
-      const comps = t.components || [];
-      const bodyComp = comps.find(c => (c.type || '').toUpperCase() === 'BODY');
-      const headerComp = comps.find(c => (c.type || '').toUpperCase() === 'HEADER');
-      const text = bodyComp?.text || '';
-
-      // Extract each {{N}} placeholder in order (deduped, sorted numerically)
-      const placeholderSet = new Set((text.match(/\{\{\s*(\d+)\s*\}\}/g) || []).map(p => p.replace(/\s/g, '')));
-      const variables = [...placeholderSet]
-        .sort((a, b) => parseInt(a.replace(/\D/g, '')) - parseInt(b.replace(/\D/g, '')))
-        .map(p => ({ placeholder: p, index: parseInt(p.replace(/\D/g, '')) }));
-
-      // Extract dynamic-URL buttons
-      const buttonComps = comps.filter(c => (c.type || '').toUpperCase() === 'BUTTONS');
-      const buttons = [];
-      buttonComps.forEach(bc => {
-        const btns = Array.isArray(bc.buttons) ? bc.buttons : (bc.buttons ? [bc.buttons] : [bc]);
-        btns.forEach((btn, idx) => {
-          const urlText = btn.url || btn.text || '';
-          const hasVar = /\{\{\d+\}\}/.test(urlText);
-          if (hasVar) {
-            buttons.push({ index: idx, type: btn.type || 'URL', text: btn.text || 'Button', url: btn.url || '' });
-          }
-        });
-      });
-
-      return {
-        name: t.name,
-        language: t.language || 'en',
-        category: (t.category || 'UTILITY').toUpperCase(),
-        status: t.status || '',
-        paramCount: variables.length,
-        body: text,
-        variables,
-        header: headerComp ? {
-          required: ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(headerComp.format || '').toUpperCase()),
-          format: String(headerComp.format || 'TEXT').toUpperCase(),
-          text: headerComp.text || '',
-          exampleUrl: headerComp.example?.header_handle?.[0] || null
-        } : null,
-        buttons
-      };
+app.post('/api/whatsapp/templates/sync', async (req, res) => {
+  try {
+    const settings = await getAllSettings();
+    const result = await fetchLiveTemplates(settings, { forceSync: true });
+    const formatted = result.templates.map(t => ({
+      ...t,
+      header: t.header ? {
+        ...t.header,
+        required: ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(t.header.format || '').toUpperCase())
+      } : null
+    }));
+    res.json({
+      success: true,
+      count: formatted.length,
+      templates: formatted,
+      sisterTemplates: result.sisterTemplates || []
     });
-    res.json(templates);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

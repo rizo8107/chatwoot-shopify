@@ -158,10 +158,25 @@ function NodeConfigPanel({ node, onChange, onDelete }: { node: Node; onChange: (
   const d = node.data as any;
   const set = (key: string, val: any) => onChange({ ...d, [key]: val });
 
-  const [templates, setTemplates] = useState<{ name: string; language: string; category: string; paramCount: number }[]>([]);
+  const [templates, setTemplates] = useState<{ name: string; language: string; category: string; paramCount: number; status?: string }[]>([]);
+  const [syncingTemplates, setSyncingTemplates] = useState(false);
+
+  const loadTemplates = (forceSync = false) => {
+    if (forceSync) setSyncingTemplates(true);
+    const url = forceSync ? `${API}/whatsapp/templates/sync` : `${API}/whatsapp/templates`;
+    fetch(url, { method: forceSync ? 'POST' : 'GET' })
+      .then(r => r.json())
+      .then(t => {
+        const list = Array.isArray(t.templates) ? t.templates : (Array.isArray(t) ? t : []);
+        setTemplates(list);
+      })
+      .catch(() => {})
+      .finally(() => { if (forceSync) setSyncingTemplates(false); });
+  };
+
   useEffect(() => {
     if (node.type !== 'whatsapp') return;
-    fetch(`${API}/whatsapp/templates`).then(r => r.json()).then(t => setTemplates(Array.isArray(t) ? t : [])).catch(() => {});
+    loadTemplates(false);
   }, [node.type]);
 
   return (
@@ -240,12 +255,24 @@ function NodeConfigPanel({ node, onChange, onDelete }: { node: Node; onChange: (
         {node.type === 'whatsapp' && (
           <>
             <div className="form-group">
-              <label className="form-label">Template Name</label>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <label className="form-label" style={{ marginBottom: 0 }}>Template Name</label>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => loadTemplates(true)}
+                  disabled={syncingTemplates}
+                  style={{ fontSize: 11, padding: '1px 6px', height: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                >
+                  {syncingTemplates ? <span className="spinner" style={{ width: 10, height: 10 }} /> : '↻'}
+                  {syncingTemplates ? 'Syncing…' : 'Sync'}
+                </button>
+              </div>
               {templates.length > 0 && (
                 <select className="select" style={{ marginBottom: 6 }} value={templates.some(t => t.name === d.templateName) ? d.templateName : ''}
                   onChange={e => { if (e.target.value) set('templateName', e.target.value); }}>
                   <option value="">— pick a template from Chatwoot —</option>
-                  {templates.map(t => <option key={t.name} value={t.name}>{t.name} · {t.language} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}</option>)}
+                  {templates.map(t => <option key={t.name} value={t.name}>{t.status && t.status !== 'APPROVED' ? `[${t.status}] ` : ''}{t.name} · {t.language} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}</option>)}
                 </select>
               )}
               <input className="input" value={d.templateName || ''} onChange={e => set('templateName', e.target.value)} placeholder="e.g. abandoned_cart_01" />

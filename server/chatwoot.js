@@ -152,9 +152,175 @@ export function normalizePhone(phone, fallbackSourceId) {
  */
 let _templateCache = { at: 0, key: '', templates: {} };
 
+export function clearTemplateCache() {
+  _templateCache = { at: 0, key: '', templates: {} };
+}
+
+export function parseTemplateComponents(t) {
+  const comps = t.components || [];
+  const bodyComp = comps.find(c => (c.type || '').toUpperCase() === 'BODY');
+  const headerComp = comps.find(c => (c.type || '').toUpperCase() === 'HEADER');
+  const buttonComps = comps.filter(c => (c.type || '').toUpperCase() === 'BUTTONS');
+  const buttons = [];
+  buttonComps.forEach(bc => {
+    const btns = Array.isArray(bc.buttons) ? bc.buttons : (bc.buttons ? [bc.buttons] : [bc]);
+    btns.forEach((btn, idx) => {
+      const urlText = btn.url || btn.text || '';
+      const varCount = (urlText.match(/\{\{\d+\}\}/g) || []).length;
+      if (varCount > 0) {
+        buttons.push({ index: idx, type: btn.type || 'URL', varCount, text: btn.text || 'Button', url: btn.url || '' });
+      }
+    });
+  });
+  const body = bodyComp?.text || '';
+  const bodyParamIndexes = [...new Set(
+    (body.match(/\{\{\s*(\d+)\s*\}\}/g) || [])
+      .map(value => Number(value.replace(/\D/g, '')))
+      .filter(Number.isInteger)
+  )];
+  const placeholderSet = new Set((body.match(/\{\{\s*(\d+)\s*\}\}/g) || []).map(p => p.replace(/\s/g, '')));
+  const variables = [...placeholderSet]
+    .sort((a, b) => parseInt(a.replace(/\D/g, '')) - parseInt(b.replace(/\D/g, '')))
+    .map(p => ({ placeholder: p, index: parseInt(p.replace(/\D/g, '')) }));
+
+  return {
+    name: t.name,
+    language: t.language || 'en',
+    category: String(t.category || 'MARKETING').toUpperCase(),
+    status: String(t.status || '').toUpperCase(),
+    paramCount: bodyParamIndexes.length ? Math.max(...bodyParamIndexes) : 0,
+    body,
+    variables,
+    header: headerComp ? {
+      format: String(headerComp.format || 'TEXT').toUpperCase(),
+      text: headerComp.text || '',
+      exampleUrl: headerComp.example?.header_handle?.[0] || null
+    } : null,
+    buttons
+  };
+}
+
 /**
- * Refresh the template cache from Chatwoot once every 60s.
- * Stores both the BODY text and the BUTTONS (with how many {{N}} vars each has).
+ * Fetch live templates by combining Chatwoot inbox message_templates with
+ * real-time Meta Cloud API templates (when provider_config is available).
+ */
+export async function fetchLiveTemplates(settings, { forceSync = false } = {}) {
+  const apiBaseUrl = (settings.CHATWOOT_API_URL || '').replace(/\/$/, '');
+  const accountId = settings.CHATWOOT_ACCOUNT_ID || '1';
+  const inboxId = settings.CHATWOOT_INBOX_ID || '1';
+  const token = settings.CHATWOOT_API_TOKEN;
+  if (!apiBaseUrl || !token) throw new Error('Chatwoot API not configured in Settings');
+
+  const cacheKey = `${apiBaseUrl}|${accountId}|${inboxId}`;
+
+  // If forceSync requested, trigger Chatwoot's internal sync_templates in background
+  if (forceSync) {
+    try {
+      await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}/sync_templates`, {
+        method: 'POST',
+        headers: { api_access_token: token, 'Content-Type': 'application/json' }
+      });
+    } catch (err) {
+      console.warn('[Chatwoot] sync_templates trigger warning:', err.message);
+    }
+  }
+
+  // Fetch inbox from Chatwoot
+  const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`, {
+    headers: { api_access_token: token }
+  });
+  if (!r.ok) {
+    const b = await r.json().catch(() => ({}));
+    throw new Error(`Chatwoot error ${r.status}: ${b.message || r.statusText}`);
+  }
+  const inboxData = await r.json();
+  const rawTemplates = inboxData.message_templates || inboxData.payload?.message_templates || [];
+
+  const templateMap = new Map();
+  for (const t of rawTemplates) {
+    if (t?.name) templateMap.set(t.name, parseTemplateComponents(t));
+  }
+
+  // Check Meta Graph API directly if provider_config is present (WhatsApp Cloud)
+  const providerConfig = inboxData.provider_config || {};
+  const apiKey = providerConfig.api_key;
+  const wabaId = providerConfig.business_account_id;
+  let sisterTemplates = [];
+
+  if (apiKey && wabaId) {
+    try {
+      const metaRes = await fetch(
+        `https://graph.facebook.com/v21.0/${wabaId}/message_templates?fields=id,name,status,category,language,components&limit=100&access_token=${encodeURIComponent(apiKey)}`
+      );
+      if (metaRes.ok) {
+        const metaJson = await metaRes.json();
+        for (const mt of (metaJson.data || [])) {
+          if (mt?.name) {
+            templateMap.set(mt.name, parseTemplateComponents(mt));
+          }
+        }
+      }
+    } catch (mErr) {
+      console.warn('[Meta] Could not fetch live Meta templates:', mErr.message);
+    }
+
+    // On force sync, also detect templates on sister WABAs in the same Meta Business Account
+    if (forceSync) {
+      try {
+        const wabaInfoRes = await fetch(`https://graph.facebook.com/v21.0/${wabaId}?fields=owner_business_info&access_token=${encodeURIComponent(apiKey)}`);
+        if (wabaInfoRes.ok) {
+          const wabaInfo = await wabaInfoRes.json();
+          const businessId = wabaInfo.owner_business_info?.id;
+          if (businessId) {
+            const ownedRes = await fetch(`https://graph.facebook.com/v21.0/${businessId}/owned_whatsapp_business_accounts?access_token=${encodeURIComponent(apiKey)}`);
+            if (ownedRes.ok) {
+              const ownedData = await ownedRes.json();
+              const otherWabas = (ownedData.data || []).filter(w => w.id !== wabaId);
+              for (const other of otherWabas) {
+                const otherTplRes = await fetch(`https://graph.facebook.com/v21.0/${other.id}/message_templates?fields=id,name,status,category,language&access_token=${encodeURIComponent(apiKey)}`);
+                if (otherTplRes.ok) {
+                  const otherJson = await otherTplRes.json();
+                  for (const ot of (otherJson.data || [])) {
+                    if (!templateMap.has(ot.name)) {
+                      sisterTemplates.push({
+                        name: ot.name,
+                        status: ot.status,
+                        language: ot.language,
+                        category: ot.category,
+                        wabaId: other.id,
+                        wabaName: other.name
+                      });
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  const templateList = Array.from(templateMap.values());
+  const cacheMap = {};
+  for (const t of templateList) {
+    cacheMap[t.name] = {
+      body: t.body,
+      bodyParamCount: t.paramCount,
+      header: t.header,
+      buttons: t.buttons,
+      category: t.category,
+      language: t.language,
+      status: t.status
+    };
+  }
+  _templateCache = { at: Date.now(), key: cacheKey, templates: cacheMap };
+
+  return { templates: templateList, sisterTemplates };
+}
+
+/**
+ * Refresh the template cache from Chatwoot / Meta once every 60s.
  */
 async function refreshTemplateCache(settings) {
   const now = Date.now();
@@ -163,58 +329,8 @@ async function refreshTemplateCache(settings) {
   const inboxId = settings.CHATWOOT_INBOX_ID || '1';
   const cacheKey = `${apiBaseUrl}|${accountId}|${inboxId}`;
   if (_templateCache.key === cacheKey && now - _templateCache.at < 60_000) return;
-  if (_templateCache.key !== cacheKey) {
-    _templateCache = { at: 0, key: cacheKey, templates: {} };
-  }
   try {
-    const token = settings.CHATWOOT_API_TOKEN;
-    if (!apiBaseUrl || !token) return;
-    const r = await fetch(`${apiBaseUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`, { headers: { api_access_token: token } });
-    if (!r.ok) return;
-    const b = await r.json();
-    const raw = b.message_templates || b.payload?.message_templates || [];
-    const templates = {};
-    for (const t of raw) {
-      const comps = t.components || [];
-      const bodyComp = comps.find(c => (c.type || '').toUpperCase() === 'BODY');
-      const headerComp = comps.find(c => (c.type || '').toUpperCase() === 'HEADER');
-      const buttonComps = comps.filter(c => (c.type || '').toUpperCase() === 'BUTTONS');
-      // Flatten button sub-entries; each button may itself be an array or object
-      const buttons = [];
-      buttonComps.forEach(bc => {
-        const btns = Array.isArray(bc.buttons) ? bc.buttons : (bc.buttons ? [bc.buttons] : [bc]);
-        btns.forEach((btn, idx) => {
-          // Count how many {{N}} placeholders are in the button's URL or text
-          const urlText = btn.url || btn.text || '';
-          const varCount = (urlText.match(/\{\{\d+\}\}/g) || []).length;
-          // Static URL buttons do not accept a parameter. Only expose buttons
-          // whose URL contains a placeholder such as {{1}}.
-          if (varCount > 0) {
-            buttons.push({ index: idx, type: btn.type || 'URL', varCount, url: btn.url || '' });
-          }
-        });
-      });
-      const body = bodyComp?.text || '';
-      const bodyParamIndexes = [...new Set(
-        (body.match(/\{\{\s*(\d+)\s*\}\}/g) || [])
-          .map(value => Number(value.replace(/\D/g, '')))
-          .filter(Number.isInteger)
-      )];
-      templates[t.name] = {
-        body,
-        bodyParamCount: bodyParamIndexes.length ? Math.max(...bodyParamIndexes) : 0,
-        header: headerComp ? {
-          format: String(headerComp.format || 'TEXT').toUpperCase(),
-          text: headerComp.text || '',
-          exampleUrl: headerComp.example?.header_handle?.[0] || null
-        } : null,
-        buttons,
-        category: String(t.category || 'MARKETING').toUpperCase(),
-        language: t.language || 'en',
-        status: String(t.status || '').toUpperCase()
-      };
-    }
-    _templateCache = { at: now, key: cacheKey, templates };
+    await fetchLiveTemplates(settings, { forceSync: false });
   } catch (_) { /* keep stale cache on failure */ }
 }
 

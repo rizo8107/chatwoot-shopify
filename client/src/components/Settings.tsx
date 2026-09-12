@@ -40,7 +40,7 @@ const EMPTY: Settings = {
   CHATWOOT_AUTOMATION_ASSIGNEE_ID: '',
 };
 
-interface TemplateInfo { name: string; language: string; category: string; paramCount: number; body: string; }
+interface TemplateInfo { name: string; language: string; category: string; status?: string; paramCount: number; body: string; }
 
 function MappingInput({ label, hint, mappingKey, templateKey, settings, onChange, templates }: {
   label: string; hint: string; mappingKey: string; templateKey: string;
@@ -67,7 +67,7 @@ function MappingInput({ label, hint, mappingKey, templateKey, settings, onChange
           <select className="select" style={{ marginBottom: 6 }} value={templates.some(t => t.name === settings[templateKey]) ? settings[templateKey] : ''}
             onChange={e => { if (e.target.value) onChange(templateKey, e.target.value); }}>
             <option value="">— pick a template from Chatwoot —</option>
-            {templates.map(t => <option key={t.name} value={t.name}>{t.name} · {t.language} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}</option>)}
+            {templates.map(t => <option key={t.name} value={t.name}>{t.status && t.status !== 'APPROVED' ? `[${t.status}] ` : ''}{t.name} · {t.language} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}</option>)}
           </select>
         )}
         <input className="input" value={settings[templateKey] || ''} onChange={e => onChange(templateKey, e.target.value)} placeholder="e.g. order_confirmation_01" />
@@ -157,6 +157,29 @@ export const Settings: React.FC = () => {
       setTimeout(() => setMsg(''), 4000);
     }
   }, []);
+
+  const [syncingTemplates, setSyncingTemplates] = useState(false);
+
+  const syncTemplates = async () => {
+    setSyncingTemplates(true);
+    setMsg('Syncing templates…');
+    try {
+      const res = await fetch(`${API}/whatsapp/templates/sync`, { method: 'POST' });
+      const data = await res.json();
+      const list = Array.isArray(data.templates) ? data.templates : (Array.isArray(data) ? data : []);
+      setTemplates(list);
+      let note = `Synced ${list.length} template${list.length !== 1 ? 's' : ''} ✓`;
+      if (data.sisterTemplates && data.sisterTemplates.length > 0) {
+        note += ` (${data.sisterTemplates.length} in other WABAs)`;
+      }
+      setMsg(note);
+    } catch (err: any) {
+      setMsg(`Sync error: ${err.message}`);
+    } finally {
+      setSyncingTemplates(false);
+      setTimeout(() => setMsg(''), 5000);
+    }
+  };
 
   const set = (k: string, v: string) => setSettings(s => ({ ...s, [k]: v }));
 
@@ -383,11 +406,21 @@ export const Settings: React.FC = () => {
 
       {/* Templates */}
       <div className="card mb-4">
-        <div className="card-header">
+        <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div>
             <div className="card-title">Order and shipping templates</div>
             <div className="card-sub">Fallbacks for order and fulfillment events. Abandoned-cart templates and timing are configured only in Recovery Flows.</div>
           </div>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={syncTemplates}
+            disabled={syncingTemplates}
+            style={{ fontSize: 12, padding: '4px 10px', display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}
+          >
+            {syncingTemplates ? <span className="spinner" style={{ width: 12, height: 12 }} /> : '↻'}
+            {syncingTemplates ? 'Syncing…' : 'Sync Templates'}
+          </button>
         </div>
 
         <div className="divider-label mb-4"><span>Order Confirmation</span></div>

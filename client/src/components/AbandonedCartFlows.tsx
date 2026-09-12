@@ -54,6 +54,7 @@ interface Template {
   name: string;
   language: string;
   category: string;
+  status?: string;
   paramCount: number;
   body: string;
   variables: TemplateVariable[];
@@ -221,15 +222,22 @@ export const AbandonedCartFlows: React.FC = () => {
     }
   };
 
-  const loadTemplates = async () => {
+  const [syncingTemplates, setSyncingTemplates] = useState(false);
+
+  const loadTemplates = async (forceSync = false) => {
     try {
-      const res = await fetch(`${API}/whatsapp/templates`);
+      if (forceSync) setSyncingTemplates(true);
+      const url = forceSync ? `${API}/whatsapp/templates/sync` : `${API}/whatsapp/templates`;
+      const res = await fetch(url, { method: forceSync ? 'POST' : 'GET' });
       if (res.ok) {
         const data = await res.json();
-        setTemplates(Array.isArray(data) ? data : []);
+        const list = Array.isArray(data.templates) ? data.templates : (Array.isArray(data) ? data : []);
+        setTemplates(list);
       }
     } catch (err) {
       console.error('Failed to load templates:', err);
+    } finally {
+      if (forceSync) setSyncingTemplates(false);
     }
   };
 
@@ -525,7 +533,19 @@ export const AbandonedCartFlows: React.FC = () => {
                   {/* Template + delay row */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 0 }}>
                     <div className="form-group" style={{ marginBottom: 0 }}>
-                      <label className="form-label" style={{ fontSize: 12 }}>WhatsApp Template</label>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                        <label className="form-label" style={{ fontSize: 12, marginBottom: 0 }}>WhatsApp Template</label>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => loadTemplates(true)}
+                          disabled={syncingTemplates}
+                          style={{ fontSize: 11, padding: '1px 6px', height: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                        >
+                          {syncingTemplates ? <span className="spinner" style={{ width: 10, height: 10 }} /> : '↻'}
+                          {syncingTemplates ? 'Syncing…' : 'Sync'}
+                        </button>
+                      </div>
                       <select
                         className="select"
                         value={msg.template_name}
@@ -534,7 +554,7 @@ export const AbandonedCartFlows: React.FC = () => {
                         <option value="">— select template —</option>
                         {templates.map(t => (
                           <option key={t.name} value={t.name}>
-                            {t.name} ({t.language} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}{t.buttons.length > 0 ? ` · ${t.buttons.length} btn` : ''})
+                            {t.status && t.status !== 'APPROVED' ? `[${t.status}] ` : ''}{t.name} ({t.language} · {t.paramCount} var{t.paramCount !== 1 ? 's' : ''}{t.buttons?.length > 0 ? ` · ${t.buttons.length} btn` : ''})
                           </option>
                         ))}
                       </select>

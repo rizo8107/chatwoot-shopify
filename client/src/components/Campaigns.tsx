@@ -291,6 +291,28 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
   const [error, setError] = useState('');
   const [wizardStep, setWizardStep] = useState(1);
 
+  const [syncingTemplates, setSyncingTemplates] = useState(false);
+
+  const syncTemplates = async () => {
+    setSyncingTemplates(true);
+    setTemplatesMsg('Syncing templates with Chatwoot and WhatsApp Cloud…');
+    try {
+      const res = await fetch(`${API}/whatsapp/templates/sync`, { method: 'POST' });
+      const data = await readApiResponse(res);
+      const list = Array.isArray(data.templates) ? data.templates : (Array.isArray(data) ? data : []);
+      setTemplates(list);
+      let msg = `Synced ${list.length} template${list.length !== 1 ? 's' : ''}.`;
+      if (data.sisterTemplates && data.sisterTemplates.length > 0) {
+        msg += ` (${data.sisterTemplates.length} templates exist in other Meta WABA accounts under your business)`;
+      }
+      setTemplatesMsg(msg);
+    } catch (err: any) {
+      setTemplatesMsg(`Sync failed: ${err.message}`);
+    } finally {
+      setSyncingTemplates(false);
+    }
+  };
+
   // Prefill template name + variable slot count from saved Settings
   useEffect(() => {
     fetch(`${API}/settings`).then(readApiResponse).then(d => {
@@ -300,7 +322,7 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
     }).catch(() => {});
   }, []);
 
-  // Load the live template list from Chatwoot
+  // Load the live template list from Chatwoot & Meta Cloud API
   useEffect(() => {
     setTemplatesMsg('Loading templates…');
     fetch(`${API}/whatsapp/templates`).then(readApiResponse).then(d => {
@@ -340,6 +362,32 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
     if (nameGuess) setNameCol(nameGuess);
     if (orderGuess) setOrderCol(orderGuess);
     if (emailGuess) setEmailCol(emailGuess);
+  };
+
+  const SAMPLE_RECIPIENTS_CSV = `Name,Phone,Order Number,Item Name,Discount Code
+Aarav Sharma,9840083727,#1024,Aurora Cow Dung Incense Sticks,AURORA15
+Priya Patel,919876543210,#1025,Handmade Dhoop Cones Pack,AURORA15
+Rahul Verma,9876543211,#1026,Pure Essential Oil Blend,AURORA15
+Ananya Iyer,919812345678,#1027,Festive Wellness Hamper,AURORA15`;
+
+  const downloadSampleCsv = () => {
+    const blob = new Blob([SAMPLE_RECIPIENTS_CSV], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'sample_recipients.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const loadSampleCsv = () => {
+    applyCsv(SAMPLE_RECIPIENTS_CSV);
+  };
+
+  const clearCsv = () => {
+    applyCsv('');
   };
 
   const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -507,6 +555,49 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
         </div>}
 
         {enrollmentSource === 'csv' ? <>
+        <div style={{
+          background: 'var(--surface-sunken, #f8f9fa)',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          padding: '12px 14px',
+          marginBottom: 16
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 6 }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>Sample CSV Template</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={loadSampleCsv}
+                style={{ fontSize: 12, padding: '3px 8px', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              >
+                <span>📋</span> Load sample data
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={downloadSampleCsv}
+                style={{ fontSize: 12, padding: '3px 8px', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              >
+                <span>⬇</span> Download sample CSV
+              </button>
+              {rows.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={clearCsv}
+                  style={{ fontSize: 12, padding: '3px 8px' }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-dim, #666)', lineHeight: 1.4 }}>
+            Includes standard headers: <code>Name</code>, <code>Phone</code>, <code>Order Number</code>, and custom attributes. Any column can be mapped to template variables like <code>{'{{1}}'}</code> and <code>{'{{2}}'}</code> in Step 2.
+          </div>
+        </div>
+
         <div className="form-group">
           <label className="form-label">Upload CSV file</label>
           <input type="file" accept=".csv,text/csv" className="input" onChange={onFile} />
@@ -514,7 +605,7 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
         <div className="form-group">
           <label className="form-label">…or paste CSV</label>
           <textarea className="textarea" style={{ minHeight: 110, fontFamily: 'var(--font-mono)', fontSize: 12 }}
-            placeholder={'Order id,Billing Name,Shipping Phone\n#2036,Kumar Kumar,9150115554'}
+            placeholder={'Name,Phone,Order Number,Item Name,Discount Code\nAarav Sharma,9840083727,#1024,Incense Sticks,AURORA15'}
             value={csvText} onChange={e => applyCsv(e.target.value)} spellCheck={false} />
         </div>
         {parseError && <div className="callout error">{parseError}</div>}
@@ -568,12 +659,24 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
         <div className="card-header"><div className="card-title">2 · Campaign settings</div></div>
 
         <div className="form-group">
-          <label className="form-label">WhatsApp template (from Chatwoot)</label>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <label className="form-label" style={{ marginBottom: 0 }}>WhatsApp template</label>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={syncTemplates}
+              disabled={syncingTemplates}
+              style={{ fontSize: 12, padding: '2px 8px', height: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            >
+              {syncingTemplates ? <span className="spinner" style={{ width: 12, height: 12 }} /> : '↻'}
+              {syncingTemplates ? 'Syncing…' : 'Sync Templates'}
+            </button>
+          </div>
           <select className="select" value={selectedTemplate} onChange={e => pickTemplate(e.target.value)}>
             <option value="">— pick a template —</option>
             {templates.map(t => (
               <option key={t.name} value={t.name}>
-                {t.name} · {t.language} · {t.category} · {t.paramCount} body var{t.paramCount !== 1 ? 's' : ''}
+                {t.status && t.status !== 'APPROVED' ? `[${t.status}] ` : ''}{t.name} · {t.language} · {t.category} · {t.paramCount} body var{t.paramCount !== 1 ? 's' : ''}
                 {t.header?.required ? ` · ${t.header.format.toLowerCase()} header` : ''}
               </option>
             ))}
@@ -685,7 +788,7 @@ function NewCampaign({ kind, onCancel, onCreated }: { kind: CampaignKind; onCanc
                 <label className="form-label">WhatsApp template</label>
                 <select className="select" value={step.template_name} onChange={e => pickFollowUpTemplate(index, e.target.value)}>
                   <option value="">— select template —</option>
-                  {templates.map(t => <option key={t.name} value={t.name}>{t.name} · {t.language}</option>)}
+                  {templates.map(t => <option key={t.name} value={t.name}>{t.status && t.status !== 'APPROVED' ? `[${t.status}] ` : ''}{t.name} · {t.language}</option>)}
                 </select>
               </div>
               <div className="form-group">

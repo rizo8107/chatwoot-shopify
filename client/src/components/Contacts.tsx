@@ -12,7 +12,7 @@ interface Contact {
   additional_attributes: Record<string, any>;
 }
 
-interface TemplateInfo { name: string; language: string; category: string; paramCount: number; body: string; }
+interface TemplateInfo { name: string; language: string; category: string; status?: string; paramCount: number; body: string; }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -344,9 +344,33 @@ function ImportToChatwoot() {
     setBusy(false);
   };
 
+  const SAMPLE_CONTACTS_CSV = `Name,Phone,Email\nAarav Sharma,9840083727,aarav@example.com\nPriya Patel,919876543210,priya@example.com\nRahul Verma,9876543211,rahul@example.com\nAnanya Iyer,919812345678,ananya@example.com`;
+
+  const downloadSampleContactsCsv = () => {
+    const blob = new Blob([SAMPLE_CONTACTS_CSV], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'sample_contacts.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="card">
-      <div className="card-header"><div className="card-title">Import contacts to Chatwoot</div></div>
+      <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <div className="card-title">Import contacts to Chatwoot</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => apply(SAMPLE_CONTACTS_CSV)} style={{ fontSize: 12, padding: '2px 8px' }}>
+            📋 Load sample
+          </button>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={downloadSampleContactsCsv} style={{ fontSize: 12, padding: '2px 8px' }}>
+            ⬇ Sample CSV
+          </button>
+        </div>
+      </div>
       <div className="form-group">
         <label className="form-label">Upload CSV</label>
         <input type="file" accept=".csv,text/csv" className="input" onChange={onFile} />
